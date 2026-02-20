@@ -16,7 +16,8 @@ def validate_aggregation(comb_df):
         'dada2_nonchim_reads', 'target_reads', 'overall_filter_rate',
         'unassigned_asvs', 'targets_recovered', 'raw_mosq_targets_recovered',
         'raw_multiallelic_mosq_targets', 'raw_mosq_reads', 'p1_reads', 'p2_reads', 
-        'p1_reads_pass', 'p2_reads_pass', 'plasmodium_detection_status', 'plasm_ref',
+        'p1_reads_pass', 'p2_reads_pass', 'plasmodium_detection_group', 'plasmodium_detection_species',
+        'plasm_ref',
         # skip plasm hap
         'multiallelic_mosq_targets', 'mosq_reads', 'mosq_targets_recovered',
         'nn_assignment', 'nn_species_call', 'nn_call_method', 'nn_ref',
@@ -84,19 +85,19 @@ def validate_aggregation(comb_df):
     assert (comb_df.target_reads == comb_df.raw_mosq_reads + comb_df.p1_reads + comb_df.p2_reads).all(), \
         'target_reads does not match raw_mosq_reads + p1_reads + p2_reads'
 
-    assert (comb_df.query('p1_reads_pass > 10')['p1_hapids_pass'].notna()).all(), \
-        'not all P1 pass records supported by 10 reads have p1_hapids_pass recorded'
+    assert (comb_df.query('p1_reads_pass > 10')['p1_seqids_pass'].notna()).all(), \
+        'not all P1 pass records supported by 10 reads have p1_seqids_pass recorded'
     assert ~((comb_df.p1_reads_pass < 10) & (comb_df.p1_reads_pass > 0)).any(), \
         'some P1 pass records supported by less than 10 reads'
-    assert (comb_df.query('p1_reads_pass == 0')['p1_hapids_pass'].isna()).all(), \
-        'record with zero p1_reads_pass has some p1_hapids_pass recorded'
+    assert (comb_df.query('p1_reads_pass == 0')['p1_seqids_pass'].isna()).all(), \
+        'record with zero p1_reads_pass has some p1_seqids_pass recorded'
 
-    assert (comb_df.query('p2_reads_pass > 10')['p2_hapids_pass'].notna()).all(), \
-        'not all P2 pass records supported by 10 reads have p2_hapids_pass recorded'
+    assert (comb_df.query('p2_reads_pass > 10')['p2_seqids_pass'].notna()).all(), \
+        'not all P2 pass records supported by 10 reads have p2_seqids_pass recorded'
     assert ~((comb_df.p2_reads_pass < 10) & (comb_df.p2_reads_pass > 0)).any(), \
         'some P2 pass records supported by less than 10 reads'
-    assert (comb_df.query('p2_reads_pass == 0')['p2_hapids_pass'].isna()).all(), \
-        'record with zero p2_reads_pass has some p2_hapids_pass recorded'
+    assert (comb_df.query('p2_reads_pass == 0')['p2_seqids_pass'].isna()).all(), \
+        'record with zero p2_reads_pass has some p2_seqids_pass recorded'
 
 def agg(args):
 

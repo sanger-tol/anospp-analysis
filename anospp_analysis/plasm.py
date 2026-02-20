@@ -141,9 +141,7 @@ def summarise_samples(sum_hap_df, comb_stats_df, filters=(10, 10)):
             .sort_values('reads', ascending=False)
         )
 
-        # --------------------
         # total reads
-        # --------------------
         total_reads = t_df.groupby('sample_id')['reads'].sum()
         sum_samples_df[f'{t}_reads_total'] = (
             total_reads.reindex(sum_samples_df.index)
@@ -151,13 +149,10 @@ def summarise_samples(sum_hap_df, comb_stats_df, filters=(10, 10)):
             .astype(int)
         )
 
-        # --------------------
-        # passing seqids
-        # --------------------
         for category in ['pass', 'contam', 'locov']:
 
             if category == 'pass':
-                 category_mask = (
+                category_mask = (
                     (t_df['reads'] >= filt) &
                     (~is_high_conf.loc[t_df.index])
                 )
@@ -296,13 +291,17 @@ def plot_plate_view(plasm_df, out_fn, reference_colours, lims_plate=True, title=
     plasm_df['comb_seqids_disp'] = plasm_df['P1_seqids_disp'] + '\n' + plasm_df['P2_seqids_disp']
 
     # additional colours for plotting
-    plasm_df['colour_group'] = plasm_df['plasmodium_consensus_group'].fillna('')
+    plasm_df['colour_group'] = plasm_df['plasmodium_detection_group']
+    plasm_df.loc[plasm_df['plasmodium_detection_group'] == 'group_consistent', 'colour_group'] = plasm_df['plasmodium_consensus_group']
     plasm_df.loc[plasm_df['plasmodium_consensus_group'].str.contains(','), 'colour_group'] = 'mixed_infection'
-    plasm_df.loc[plasm_df['plasmodium_detection_group'] == 'contamination_only', 'colour_group'] = 'contamination_only'
 
-    reference_colours[''] = '#ffffff'
+    reference_colours['not_detected'] = '#ffffff'
     reference_colours['mixed_infection'] = '#cfcfcf'
-    reference_colours['contamination_only'] = '#dfdfdf'
+    reference_colours['contamination_only'] = '#efefef'
+    reference_colours['P1_only'] = '#dfdfdf'
+    reference_colours['P2_only'] = '#dfdfdf'
+    reference_colours['group_consistent_P1_locov'] = '#dfdfdf'
+    reference_colours['group_consistent_P2_locov'] = '#dfdfdf'
 
     #load the dataframe into the source
     source = ColumnDataSource(plasm_df)
@@ -444,7 +443,9 @@ def plasm(args):
 
     if sintax_df.shape[0] > 0:
         annotated_hap_df = pd.merge(plasm_hap_df, sintax_df, on=['seqid','target'])
-        annotated_hap_df.to_csv(f'{args.outdir}/plasm_hap_summary.tsv', sep='\t', index=False)
+        annotated_hap_fn = f'{args.outdir}/plasm_hap_summary.tsv'
+        logging.info(f'writing annotated haplotypes to {annotated_hap_fn}')
+        annotated_hap_df.to_csv(annotated_hap_fn, sep='\t', index=False)
     else:
         logging.warning('no Plasmodium haplotypes to annotate, terminating')
         return
@@ -469,9 +470,6 @@ def plasm(args):
         comb_stats_df,
         filters=(args.filter_p1, args.filter_p2),
     )
-    annotated_sample_df['plasm_ref'] = reference_version
-    annotated_sample_df.to_csv(f'{args.outdir}/plasm_sample_summary.tsv', sep='\t', index=False)
-
 
     if args.interactive_plotting:
 
@@ -491,10 +489,20 @@ def plasm(args):
             plot_df = annotated_sample_df[annotated_sample_df.lims_plate_id == lims_plate]
             plot_plate_view(plot_df, out_fn, reference_colours, lims_plate=True, title=title)
 
+    annotated_sample_df['plasm_ref'] = reference_version
+    annotated_sample_df.reset_index(inplace=True)
+    annotated_sample_df.columns = annotated_sample_df.columns.str.lower()
+    plasm_assignment_fn = f'{args.outdir}/plasm_assignment.tsv'
+    logging.info(f'writing sample level plasm assignment to {plasm_assignment_fn}')
+    annotated_sample_df.drop(columns=[
+        'sample_name',
+        'lims_plate_id',
+        'lims_well_id',
+        'plate_id',
+        'well_id'
+    ]).to_csv(plasm_assignment_fn, sep='\t', index=False)
+
     logging.info('ANOSPP plasm complete')
-
-    return
-
 
 def main():
 
