@@ -1,12 +1,15 @@
 import pandas as pd
 import argparse
+import logging
 
-from anospp_analysis.util import *
+from anospp_analysis.util import setup_logging, well_id_mapper, lims_well_id_mapper, prep_comb_stats
+
 
 def validate_aggregation(comb_df):
 
-    logging.info('checking data types')
+    logging.info('validating ANOSPP data aggregation results')
 
+    # check for unexpected missing values
     for col in [
         'sample_id', #'irods_path', 'id_library_lims', 'id_study_lims', 'sanger_sample_id', 'front_barcode', 'rear_barcode'
         'run_id', 'lane_index', 'tag_index', 'plate_id',
@@ -16,8 +19,8 @@ def validate_aggregation(comb_df):
         'dada2_nonchim_reads', 'target_reads', 'overall_filter_rate',
         'unassigned_asvs', 'targets_recovered', 'raw_mosq_targets_recovered',
         'raw_multiallelic_mosq_targets', 'raw_mosq_reads', 'p1_reads', 'p2_reads', 
-        'p1_reads_pass', 'p2_reads_pass', 'plasmodium_detection_group', 'plasmodium_detection_species',
-        'plasm_ref',
+        'p1_reads_pass', 'p2_reads_pass', 'p1_reads_contam', 'p2_reads_contam', 'p1_reads_locov', 'p2_reads_locov',
+        'plasm_detection_group', 'plasm_detection_species', 'plasm_ref',
         # skip plasm hap
         'multiallelic_mosq_targets', 'mosq_reads', 'mosq_targets_recovered',
         'nn_assignment', 'nn_species_call', 'nn_call_method', 'nn_ref',
@@ -26,8 +29,9 @@ def validate_aggregation(comb_df):
         ]:
         assert ~comb_df[col].isna().any(), f'missing {col} values found'
 
+    # check integer columns
     for col in [
-        'run_id', 'lane_index', 'tag_index',
+        'lane_index', 'tag_index', #'run_id', 
         'total_reads', 'readthrough_pass_reads', 'dada2_input_reads',
         'dada2_filtered_reads', 'dada2_denoised_reads', 'dada2_merged_reads',
         'dada2_nonchim_reads', 'target_reads',
@@ -39,6 +43,7 @@ def validate_aggregation(comb_df):
         assert pd.api.types.is_integer_dtype(comb_df[col]), f'{col} datatype is not integer'
         assert (comb_df[col] >= 0).all(), f'{col} contains negative values'
 
+    # check float columns
     for col in ['overall_filter_rate']:
         assert pd.api.types.is_numeric_dtype(comb_df[col]), f'{col} datatype is not numeric'
 
@@ -47,7 +52,7 @@ def validate_aggregation(comb_df):
 
     logging.info('checking columns contents')
 
-    assert comb_df.sample_id.is_unique, 'duplicated sample_id found'
+    assert comb_df.sample_id.is_unique, 'duplicate sample_id found'
 
     assert len(comb_df.run_id.unique()) == 1, 'more than a single run_id found'
 
@@ -55,6 +60,7 @@ def validate_aggregation(comb_df):
 
     assert comb_df.lims_well_id.isin(lims_well_id_mapper().values()).all(), 'non A1...P24 lims_well_id found'
 
+    # compare read counts across steps, should be non-increasing
     for (colp, coln) in [
         ('total_reads', 'readthrough_pass_reads'),
         ('readthrough_pass_reads', 'dada2_input_reads'),
@@ -106,16 +112,11 @@ def agg(args):
     logging.info('ANOSPP results merging data import started')
     
     run_id, comb_stats_df = prep_comb_stats(args.stats)
-    # qc_df = pd.read_csv(args.qc, sep='\t')
     plasm_df = pd.read_csv(args.plasm, sep='\t')
     nn_df = pd.read_csv(args.nn, sep='\t')
     vae_df = pd.read_csv(args.vae, sep='\t')
 
     logging.info("merging results tables")
-
-    # assert set(manifest_df.sample_id) == set(qc_df.sample_id), \
-    #     'lanelets manifest and QC samples do not match'
-    # comb_df = pd.merge(manifest_df, qc_df, how='inner')
 
     assert set(comb_stats_df.sample_id) == set(plasm_df.sample_id), \
         'plasm samples do not match comb stats'
@@ -167,9 +168,9 @@ def main():
                         help='Output aggregated sample metadata tsv. Default: anospp_results.tsv', 
                         default='anospp_results.tsv')
     parser.add_argument('-f', '--force', 
-                        help='Skip aggregation validation', action='store_true', default=False)
+                        help='Skip aggregation validation', action='store_true')
     parser.add_argument('-v', '--verbose', 
-                        help='Include INFO level log messages', action='store_true', default=True)
+                        help='Include INFO level log messages', action='store_true')
                         
 
     args = parser.parse_args()

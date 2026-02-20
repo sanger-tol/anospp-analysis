@@ -3,6 +3,7 @@ import os
 import re
 import logging
 import pandas as pd
+pd.set_option('future.no_silent_downcasting', True)
 
 from anospp_analysis.util import prep_hap, prep_comb_stats, setup_logging, hap_to_fa, PLASM_TARGETS
 from anospp_analysis.vsearch import run_vsearch_sintax
@@ -233,7 +234,7 @@ def summarise_samples(sum_hap_df, comb_stats_df, filters=(10, 10)):
 
     def consensus_call(row, tax):
 
-        if row[f'plasmodium_detection_{tax}'] in {
+        if row[f'plasm_detection_{tax}'] in {
             'contamination_only',
             'P1_only',
             'P2_only',
@@ -248,10 +249,10 @@ def summarise_samples(sum_hap_df, comb_stats_df, filters=(10, 10)):
         return ';'.join(calls)
 
     for tax in ['species', 'group']:
-        sum_samples_df[f'plasmodium_detection_{tax}'] = (
+        sum_samples_df[f'plasm_detection_{tax}'] = (
             sum_samples_df.apply(lambda row: infer_status(row, tax=tax), axis=1)
         )
-        sum_samples_df[f'plasmodium_consensus_{tax}'] = (
+        sum_samples_df[f'plasm_consensus_{tax}'] = (
             sum_samples_df.apply(lambda row: consensus_call(row, tax=tax), axis=1)
         )
 
@@ -266,7 +267,7 @@ def plot_plate_view(plasm_df, out_fn, reference_colours, lims_plate=True, title=
     from bokeh.transform import dodge
 
     '''
-    Plots interactive plate map with plasmodium annotations
+    Plots interactive plate map with plasm annotations
     '''
     plasm_df = plasm_df.copy()
 
@@ -291,9 +292,9 @@ def plot_plate_view(plasm_df, out_fn, reference_colours, lims_plate=True, title=
     plasm_df['comb_seqids_disp'] = plasm_df['P1_seqids_disp'] + '\n' + plasm_df['P2_seqids_disp']
 
     # additional colours for plotting
-    plasm_df['colour_group'] = plasm_df['plasmodium_detection_group']
-    plasm_df.loc[plasm_df['plasmodium_detection_group'] == 'group_consistent', 'colour_group'] = plasm_df['plasmodium_consensus_group']
-    plasm_df.loc[plasm_df['plasmodium_consensus_group'].str.contains(','), 'colour_group'] = 'mixed_infection'
+    plasm_df['colour_group'] = plasm_df['plasm_detection_group']
+    plasm_df.loc[plasm_df['plasm_detection_group'] == 'group_consistent', 'colour_group'] = plasm_df['plasm_consensus_group']
+    plasm_df.loc[plasm_df['plasm_consensus_group'].str.contains(','), 'colour_group'] = 'mixed_infection'
 
     reference_colours['not_detected'] = '#ffffff'
     reference_colours['mixed_infection'] = '#cfcfcf'
@@ -350,9 +351,9 @@ def plot_plate_view(plasm_df, out_fn, reference_colours, lims_plate=True, title=
     #set up the hover value
     p.add_tools(HoverTool(tooltips=[
         ('sample id', '@{sample_id}'),
-        ('Parasite group', '@plasmodium_consensus_group'),
-        ('Parasite species', '@plasmodium_consensus_species'),
-        ('Species detection status', '@plasmodium_detection_species'),
+        ('Parasite group', '@plasm_consensus_group'),
+        ('Parasite species', '@plasm_consensus_species'),
+        ('Species detection status', '@plasm_detection_species'),
         ('P1 total reads', '@P1_reads_total'),
         ('P1 QC pass reads', '@P1_reads_pass'),
         ('P1 QC pass haplotype IDs', '@P1_seqids_pass'),
@@ -383,6 +384,19 @@ def plot_plate_view(plasm_df, out_fn, reference_colours, lims_plate=True, title=
     p.legend.click_policy='hide'
     p.add_layout(p.legend[0], 'right') 
     save(p)
+
+def empty_haps():
+
+    cols = [
+        # from haps
+        'sample_id','target','consensus','reads','total_reads','reads_fraction','nalleles','seqid',
+        # from sintax
+        'strand',
+        'domain','domain_bootstrap','phylum','phylum_bootstrap','order','order_bootstrap','family','family_bootstrap',
+        'genus','genus_bootstrap','subgenus','subgenus_bootstrap','group','group_bootstrap','species','species_bootstrap'
+        ]
+
+    return pd.DataFrame(columns=cols)
 
 def plasm(args):
 
@@ -441,14 +455,17 @@ def plasm(args):
     
     sintax_df = pd.concat(sintax_dfs)
 
+
+    annotated_hap_fn = f'{args.outdir}/plasm_hap_summary.tsv'
+    plasm_assignment_fn = f'{args.outdir}/plasm_assignment.tsv'
     if sintax_df.shape[0] > 0:
         annotated_hap_df = pd.merge(plasm_hap_df, sintax_df, on=['seqid','target'])
-        annotated_hap_fn = f'{args.outdir}/plasm_hap_summary.tsv'
         logging.info(f'writing annotated haplotypes to {annotated_hap_fn}')
-        annotated_hap_df.to_csv(annotated_hap_fn, sep='\t', index=False)
     else:
-        logging.warning('no Plasmodium haplotypes to annotate, terminating')
-        return
+        logging.warning('no Plasmodium haplotypes to annotate, creating empty haplotypes file')
+        annotated_hap_df = empty_haps()
+
+    annotated_hap_df.to_csv(annotated_hap_fn, sep='\t', index=False)
 
     if args.estimate_contamination:
         logging.info('estimating cross-contamination')
@@ -492,7 +509,6 @@ def plasm(args):
     annotated_sample_df['plasm_ref'] = reference_version
     annotated_sample_df.reset_index(inplace=True)
     annotated_sample_df.columns = annotated_sample_df.columns.str.lower()
-    plasm_assignment_fn = f'{args.outdir}/plasm_assignment.tsv'
     logging.info(f'writing sample level plasm assignment to {plasm_assignment_fn}')
     annotated_sample_df.drop(columns=[
         'sample_name',
@@ -503,6 +519,7 @@ def plasm(args):
     ]).to_csv(plasm_assignment_fn, sep='\t', index=False)
 
     logging.info('ANOSPP plasm complete')
+
 
 def main():
 
