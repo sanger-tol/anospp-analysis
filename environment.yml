@@ -5,9 +5,7 @@ channels:
   - nodefaults
 dependencies:
   # non-python requirements
-  - blast
-  - fasttree
-  - mafft
+  - vsearch
   # python requirements should go to pyproject.toml
   # this section only deals with basic poetry installation
   - python=3.10.*

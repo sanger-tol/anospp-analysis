@@ -1,110 +1,68 @@
 import argparse
 import os
 import re
-import sys
-import subprocess
+import logging
+import pandas as pd
 
-from anospp_analysis.util import *
-from anospp_analysis.iplot import plot_plate_view
+from anospp_analysis.util import prep_hap, prep_comb_stats, setup_logging, hap_to_fa, PLASM_TARGETS
+from anospp_analysis.vsearch import run_vsearch_sintax
 
-SUM_HAP_COLS = [
-    'sample_id',
-    'target',
-    'reads',
-    'total_reads',
-    'reads_fraction',
-    'nalleles',
-    'seqid',
-    'sample_name',
-    'contamination_status',
-    'contamination_confidence',
-    'sseqid',
-    'pident',
-    'qcovs',
-    'species_assignment',
-    'hap_seqid',
-    'plate_id',
-    'well_id',
-    'consensus'
-]
-
-def run_blast(plasm_hap_df, outdir, blastdb, min_pident, min_qcov):
-
-    logging.info('running blast')
-
-    seq_df = plasm_hap_df[['seqid', 'consensus']].drop_duplicates()
-
-    with open(f"{outdir}/plasm_haps.fasta", "w") as output:
-        for _, row in seq_df.iterrows():
-            output.write(f">{row['seqid']}\n")
-            output.write(f"{row['consensus']}\n")
-
-    # Run blast and capture the output
-    blast_cols = 'qseqid sseqid slen qstart qend length mismatch gapopen gaps sseq pident evalue bitscore qcovs'
-    cmd = (
-        f"blastn -db {blastdb} "
-        f"-query {outdir}/plasm_haps.fasta "
-        f"-out {outdir}/plasm_blastout.tsv "
-        f"-outfmt '6 {blast_cols}' "
-        f"-word_size 5 -max_target_seqs 1 -evalue 0.01"
+def parse_sintax(sintax_tsv, ranks):
+    df = pd.read_csv(sintax_tsv, sep="\t", names=["seqid", "taxonomy", "strand"])
+    
+    tax = (
+        df[["seqid", "taxonomy"]]
+        .assign(taxonomy=lambda x: x["taxonomy"].str.split(","))
+        .explode("taxonomy")
+        .assign(taxonomy=lambda x: x["taxonomy"].str.strip())
+        .assign(
+            rank=lambda x: x["taxonomy"].str.extract(r"^(\w):"),
+            name=lambda x: x["taxonomy"].str.extract(r":(.+)\(")[0],
+            bootstrap=lambda x: x["taxonomy"].str.extract(r"\(([\d.]+)\)")[0].astype(float),
         )
-    process = subprocess.run(cmd, capture_output=True, text=True, shell=True)
+    )
+    
+    tax["rank"] = tax["rank"].map(ranks)
+    
+    wide = (
+        tax
+        .pivot(index="seqid", columns="rank", values="name")
+        .join(
+            tax.pivot(index="seqid", columns="rank", values="bootstrap")
+            .add_suffix("_bootstrap")
+        )
+    )
+    
+    df = df.merge(wide, left_on="seqid", right_index=True)
 
-    # Handle errors
-    if process.returncode != 0:
-        logging.error(f"An error occurred while running the blastn command: {cmd}")
-        logging.error(f"Command error: {process.stderr}")
-        sys.exit(1)
+    out_cols = [
+        'seqid',
+        'strand'
+    ] 
+    for r in ranks.values():
+        out_cols.extend([r, r + '_bootstrap'])
+    
+    for col in out_cols:
+        if col not in df.columns:
+            df[col] = ''
 
-    blast_df = pd.read_csv(f'{outdir}/plasm_blastout.tsv', sep='\t', names=blast_cols.split())
+    return df[out_cols].copy()
 
-    # not handling multiple blast hits for now
-    multi_hits = blast_df.qseqid.duplicated()
-    if multi_hits.any():
-        multi_hits_haps = blast_df.qseqid[multi_hits].to_list()
-        logging.warning(f'multiple blast hits found for {multi_hits_haps}, retaining only first hit for analysis')
-        blast_df = blast_df[~ multi_hits]
-
-    # annotate blast results
-    blast_df['genus'] = blast_df.sseqid.str.split('_').str.get(0)
-    blast_df['species'] = blast_df.sseqid.str.split('_').str.get(1)
-    blast_df['binomial'] = blast_df['genus'] + '_' + blast_df['species']
-    blast_df['species_assignment'] = blast_df['binomial']
-    unknown_species = ((blast_df.pident < min_pident) | (blast_df.qcovs < min_qcov))
-    blast_df.loc[unknown_species, 'species_assignment'] = 'unknown'
-    blast_df['ref_seqid'] = blast_df.sseqid.str.split(':').str.get(1)
-
-    def assign_hap_id(blast_row):
-        
-        # most annotations require both 100% coverage and identity    
-        if blast_row.pident == 100:
-            if blast_row.qcovs == 100:
-                return blast_row.ref_seqid
-            # M annotations require lower query coverage
-            elif blast_row.ref_seqid.startswith('M') and (blast_row.qcovs >= min_qcov):
-                return blast_row.ref_seqid
-        
-        # use per-per run seqids P1-0 -> X1-0 etc
-        # seqids won't be sequential 
-        hap_id_x = blast_row.qseqid.replace('P', 'X')
-
-        return hap_id_x
-        
-    blast_df['hap_seqid'] = blast_df.apply(assign_hap_id, axis=1)
-
-    return blast_df
-
-def estimate_contamination(hap_df, comb_stats_df, min_samples, min_source_reads, max_affected_reads):
+def estimate_contamination(
+    hap_df,
+    comb_stats_df,
+    min_reads_source,
+    min_samples_affected,
+    min_cov_ratio,
+):
     """
     Identify potential contamination from excessive haplotype sharing between
     high coverage sample (source) and many low coverage samples (affected).
 
-    Contamination is more likely between samples sharing plates or wells
+    High confidence is given to contamination between samples sharing plate or well - 
+    in ANOSPP, this also corresponds to sharing forward or reverse index 
     """
 
-    logging.info('estimating cross-contamination')
-
-    hap_df = hap_df[['sample_id', 'seqid', 'reads']]
     ext_hap_df = pd.merge(hap_df, comb_stats_df, on='sample_id', how='left')
 
     assert ~ext_hap_df['well_id'].isna().any(), 'failed to get well IDs'
@@ -113,176 +71,338 @@ def estimate_contamination(hap_df, comb_stats_df, min_samples, min_source_reads,
     ext_hap_df['contamination_status'] = ''
     ext_hap_df['contamination_confidence'] = ''
 
-    for seqid, hapid_df in ext_hap_df.groupby('seqid'):
-
-        # status - haplotype sharing
-        if (hapid_df.reads > min_source_reads).any():
-            if (hapid_df.reads < max_affected_reads).sum() > min_samples:
+    for seqid, seqid_df in ext_hap_df.groupby('seqid'):
+        # any potential source for seqid
+        source_samples = (seqid_df.reads > min_reads_source)
+        if source_samples.any():
+            logging.info(f'contamination detected for {seqid}')
+            # affected sample coverage cutoff
+            max_reads_affected = seqid_df.reads.max() / min_cov_ratio
+            affected_samples = (seqid_df.reads < max_reads_affected)
+            if affected_samples.sum() >= min_samples_affected:
                 # source and affected data
-                src_df = hapid_df.loc[hapid_df.reads > min_source_reads]
-                tgt_df = hapid_df.loc[hapid_df.reads < max_affected_reads]
+                src_df = seqid_df.loc[source_samples]
+                tgt_df = seqid_df.loc[affected_samples]
                 # sample & hap define positions in original df
-                src_haps = (ext_hap_df.sample_id.isin(src_df['sample_id']) & (ext_hap_df.seqid == seqid))
-                tgt_haps = (ext_hap_df.sample_id.isin(tgt_df['sample_id']) & (ext_hap_df.seqid == seqid))
-                # set contamination statuses in original df
+                is_src_seqid = (ext_hap_df.sample_id.isin(src_df['sample_id']) & (ext_hap_df.seqid == seqid))
+                is_tgt_seqid = (ext_hap_df.sample_id.isin(tgt_df['sample_id']) & (ext_hap_df.seqid == seqid))
+                # set contamination statuses 
+                # unclear - between max_reads_affected and min_reads_source
                 ext_hap_df.loc[(ext_hap_df.seqid == seqid), 'contamination_status'] = 'unclear'
-                ext_hap_df.loc[src_haps, 'contamination_status'] = 'source'
-                ext_hap_df.loc[tgt_haps, 'contamination_status'] = 'affected'
+                ext_hap_df.loc[is_src_seqid, 'contamination_status'] = 'source'
+                ext_hap_df.loc[is_tgt_seqid, 'contamination_status'] = 'affected'
                 # confidence - low without plate/well match
-                ext_hap_df.loc[tgt_haps, 'contamination_confidence'] = 'low'
+                ext_hap_df.loc[is_tgt_seqid, 'contamination_confidence'] = 'low'
                 for _, src_row in src_df.iterrows():
                     # affected samples sharing plate or well with source
                     same_plate_tgt_samples = tgt_df.loc[tgt_df.plate_id == src_row.plate_id, 'sample_id']
+                    if same_plate_tgt_samples.shape[0] > 0:
+                        hc_tgt_haps = (ext_hap_df.sample_id.isin(same_plate_tgt_samples) & (ext_hap_df.seqid == seqid))
+                        ext_hap_df.loc[hc_tgt_haps, 'contamination_confidence'] = 'high_plate_sharing'
                     same_well_tgt_samples = tgt_df.loc[tgt_df.well_id == src_row.well_id, 'sample_id']
-                    hc_tgt_samples = pd.concat([same_plate_tgt_samples, same_well_tgt_samples])
-                    if len(hc_tgt_samples) > 0:
-                        # sample & hap define positions in original df
-                        hc_tgt_haps = (ext_hap_df.sample_id.isin(hc_tgt_samples) & (ext_hap_df.seqid == seqid))
-                        # update confidence for plate/well match
-                        ext_hap_df.loc[hc_tgt_haps, 'contamination_confidence'] = 'high'
+                    if same_well_tgt_samples.shape[0] > 0:
+                        hc_tgt_haps = (ext_hap_df.sample_id.isin(same_well_tgt_samples) & (ext_hap_df.seqid == seqid))
+                        ext_hap_df.loc[hc_tgt_haps, 'contamination_confidence'] = 'high_well_sharing'
+                            
 
+    ext_hap_df.to_csv('contamination_debug.tsv', sep='\t', index=False)
     return ext_hap_df
 
-def summarise_haplotypes(hap_df, blast_df, contam_df):
-
-    logging.info('summarising haplotype info')
-
-    sum_hap_df = pd.merge(hap_df, contam_df, how='left') # multiple columns to be merged
-    sum_hap_df = pd.merge(sum_hap_df, blast_df, left_on='seqid', right_on='qseqid')
-
-    sum_hap_df = sum_hap_df[SUM_HAP_COLS]
-
-    return sum_hap_df
-
-def summarise_samples(sum_hap_df, comb_stats_df, filters=(10,10)):
+def summarise_samples(sum_hap_df, comb_stats_df, filters=(10, 10)):
 
     logging.info('summarising sample info')
 
-    sum_samples_df = comb_stats_df[[
-        'sample_id',
-        'sample_name',
-        'lims_plate_id',
-        'lims_well_id',
-        'plate_id',
-        'well_id'
-    ]].copy().set_index('sample_id')
+    # base sample table
+    sum_samples_df = (
+        comb_stats_df[
+            [
+                'sample_id',
+                'sample_name',
+                'lims_plate_id',
+                'lims_well_id',
+                'plate_id',
+                'well_id',
+            ]
+        ]
+        .drop_duplicates('sample_id')
+        .set_index('sample_id')
+    )
 
-    sum_hap_df['reads_str'] = sum_hap_df['reads'].astype(str)
+    sum_hap_df = sum_hap_df.copy()
+
+    # treat any contamination_confidence starting with "high" as high
+    is_high_conf = sum_hap_df['contamination_confidence'].str.startswith('high', na=False)
+
     for i, t in enumerate(PLASM_TARGETS):
-        t_hap_df = sum_hap_df[sum_hap_df.target == t]
-        t_sum_hap_gbs = t_hap_df.groupby('sample_id')
-        sum_samples_df[f'{t}_reads_total'] = t_sum_hap_gbs['reads'].sum()
-        sum_samples_df[f'{t}_reads_total'] = sum_samples_df[f'{t}_reads_total'].astype(float).fillna(0).astype(int)
-        # pass criteria:
-        # - read count over filter value
-        # - haplotype is not high confidence affected by contamination
-        t_pass_hap_gbs = t_hap_df[
-            (t_hap_df.reads >= filters[i]) &
-            (t_hap_df.contamination_confidence != 'high')
-            ].sort_values('reads', ascending=False).groupby('sample_id')
-        sum_samples_df[f'{t}_reads_pass'] = t_pass_hap_gbs['reads'].sum()
-        sum_samples_df[f'{t}_reads_pass'] = sum_samples_df[f'{t}_reads_pass'].astype(float).fillna(0).astype(int)
-        sum_samples_df[f'{t}_hapids_pass'] = t_pass_hap_gbs.agg({'hap_seqid': ';'.join})
-        sum_samples_df[f'{t}_hapids_pass'] = sum_samples_df[f'{t}_hapids_pass'].fillna('')
-        sum_samples_df[f'{t}_hapids_pass_reads'] = t_pass_hap_gbs.agg({'reads_str': ';'.join})
-        sum_samples_df[f'{t}_hapids_pass_reads'] = sum_samples_df[f'{t}_hapids_pass_reads'].fillna('')
-        sum_samples_df[f'{t}_species_assignments_pass'] = t_pass_hap_gbs.agg(
-            {'species_assignment': ';'.join}
-            )
-        sum_samples_df[f'{t}_species_assignments_pass'] = sum_samples_df[f'{t}_species_assignments_pass'].fillna('')
-        # contaminated haplotypes with read count over filter value
-        t_contam_hap_gbs = t_hap_df[
-            (t_hap_df.reads >= filters[i]) &
-            (t_hap_df.contamination_status == 'affected') &
-            (t_hap_df.contamination_confidence == 'high')
-            ].sort_values('reads', ascending=False).groupby('sample_id')
-        sum_samples_df[f'{t}_hapids_contam'] = t_contam_hap_gbs.agg({'hap_seqid': ';'.join})
-        sum_samples_df[f'{t}_hapids_contam'] = sum_samples_df[f'{t}_hapids_contam'].fillna('')
-        sum_samples_df[f'{t}_hapids_contam_reads'] = t_contam_hap_gbs.agg({'reads_str': ';'.join})
-        sum_samples_df[f'{t}_hapids_contam_reads'] = sum_samples_df[f'{t}_hapids_contam_reads'].fillna('')
-        # low coverage haplotypes
-        t_locov_hap_gbs = t_hap_df[
-            (t_hap_df.reads < filters[i])
-            ].sort_values('reads', ascending=False).groupby('sample_id')
-        sum_samples_df[f'{t}_hapids_locov'] = t_locov_hap_gbs.agg({'hap_seqid': ';'.join})
-        sum_samples_df[f'{t}_hapids_locov'] = sum_samples_df[f'{t}_hapids_locov'].fillna('')
-        sum_samples_df[f'{t}_hapids_locov_reads'] = t_locov_hap_gbs.agg({'reads_str': ';'.join})
-        sum_samples_df[f'{t}_hapids_locov_reads'] = sum_samples_df[f'{t}_hapids_locov_reads'].fillna('')
-        sum_samples_df[f'{t}_species_assignments_locov'] = t_locov_hap_gbs.agg(
-            {'species_assignment': ';'.join}
-            )
-        sum_samples_df[f'{t}_species_assignments_locov'] = sum_samples_df[f'{t}_species_assignments_locov'].fillna('')
-        
+        filt = filters[i]
 
-    def infer_status(sum_samples_row, targets=PLASM_TARGETS):
-        # not generalised
-        p1_spp_pass = set(sum_samples_row['P1_species_assignments_pass'].split(';')) - set([''])
-        p2_spp_pass = set(sum_samples_row['P2_species_assignments_pass'].split(';')) - set([''])
-        p1_spp_locov = set(sum_samples_row['P1_species_assignments_locov'].split(';')) - set([''])
-        p2_spp_locov = set(sum_samples_row['P2_species_assignments_locov'].split(';')) - set([''])
-        is_contam = (
-            (len(sum_samples_row['P1_hapids_contam']) > 0) |
-            (len(sum_samples_row['P2_hapids_contam']) > 0)
+        t_df = (
+            sum_hap_df[sum_hap_df.target == t]
+            .sort_values('reads', ascending=False)
         )
-        if len(p1_spp_pass) > 0:
-            if len(p2_spp_pass) > 0:
-                if p1_spp_pass == p1_spp_pass:
-                    status = 'species_consistent'
-                elif p1_spp_pass - p1_spp_pass == set():
-                    status = 'extra_species_in_P2'
-                elif p1_spp_pass - p1_spp_pass == set():
-                    status = 'extra_species_in_P1'
-                else:
-                    status = 'species_discordant'
-            else:
-                # species consistent even if P2 does not pass coverage filter
-                if p1_spp_pass == p2_spp_locov:
-                    status = 'species_consistent_P2_locov'
-                else:
-                    status = 'P1_only'
-        elif len(p2_spp_pass) > 0:
-            if p1_spp_locov == p2_spp_pass:
-                status = 'species_consistent_P1_locov'
-            status = 'P2_only'
-        elif is_contam:
-            status = 'contamination_only'
-        else:
-            status = 'not_detected'
 
-        return status
+        # --------------------
+        # total reads
+        # --------------------
+        total_reads = t_df.groupby('sample_id')['reads'].sum()
+        sum_samples_df[f'{t}_reads_total'] = (
+            total_reads.reindex(sum_samples_df.index)
+            .fillna(0)
+            .astype(int)
+        )
 
-    sum_samples_df['plasmodium_detection_status'] = sum_samples_df.apply(infer_status, axis=1)
+        # --------------------
+        # passing seqids
+        # --------------------
+        for category in ['pass', 'contam', 'locov']:
 
-    def consensus_species(sum_samples_row, targets=PLASM_TARGETS):
+            if category == 'pass':
+                 category_mask = (
+                    (t_df['reads'] >= filt) &
+                    (~is_high_conf.loc[t_df.index])
+                )
+            elif category == 'contam':
+                category_mask = (
+                    (t_df['reads'] >= filt) &
+                    (t_df['contamination_status'] == 'affected') &
+                    (is_high_conf.loc[t_df.index])
+                )
+            elif category == 'locov':
+                category_mask = t_df['reads'] < filt    
 
-        # no consensus species for statuses not considered positive
-        nocall_statuses = (
-            'contamination_only', 
-            'P1_only', 
-            'P2_only', 
-            'not_detected'
+            category_df = t_df[category_mask] 
+            category_gb = category_df.groupby('sample_id')
+            sum_samples_df[f'{t}_reads_{category}'] = (
+                category_gb['reads'].sum()
+                .reindex(sum_samples_df.index)
+                .fillna(0)
+                .astype(int)
             )
-        if sum_samples_row['plasmodium_detection_status'] in nocall_statuses:
+            category_gb = category_df.astype(str).groupby('sample_id')
+            for col, outcol in [
+                ('seqid', f'{t}_seqids_{category}'),
+                ('reads', f'{t}_seqids_{category}_reads'),
+                ('genus', f'{t}_genus_{category}'),
+                ('genus_bootstrap', f'{t}_genus_bootstrap_{category}'),
+                ('group', f'{t}_group_{category}'),
+                ('group_bootstrap', f'{t}_group_bootstrap_{category}'),
+                ('species', f'{t}_species_{category}'),
+                ('species_bootstrap', f'{t}_species_bootstrap_{category}'),
+            ]:
+                sum_samples_df[outcol] = (
+                    category_gb[col]
+                    .agg(';'.join)
+                    .reindex(sum_samples_df.index)
+                    .fillna('')
+                )
+
+    def _split_set(val):
+        return set(val.split(';')) - {''}
+
+    def infer_status(row, tax):
+
+        p1_pass = _split_set(row[f'P1_{tax}_pass'])
+        p2_pass = _split_set(row[f'P2_{tax}_pass'])
+        p1_locov = _split_set(row[f'P1_{tax}_locov'])
+        p2_locov = _split_set(row[f'P2_{tax}_locov'])
+
+        is_contam = (
+            bool(row['P1_seqids_contam']) or
+            bool(row['P2_seqids_contam'])
+        )
+
+        if p1_pass:
+            if p2_pass:
+                if p1_pass == p2_pass:
+                    return f'{tax}_consistent'
+                elif p1_pass.issubset(p2_pass):
+                    return f'extra_{tax}_in_P2'
+                elif p2_pass.issubset(p1_pass):
+                    return f'extra_{tax}_in_P1'
+                else:
+                    return f'{tax}_discordant'
+            else:
+                if p1_pass == p2_locov:
+                    return f'{tax}_consistent_P2_locov'
+                return 'P1_only'
+
+        if p2_pass:
+            if p2_pass == p1_locov:
+                return f'{tax}_consistent_P1_locov'
+            return 'P2_only'
+
+        if is_contam:
+            return 'contamination_only'
+
+        return 'not_detected'
+
+    def consensus_call(row, tax):
+
+        if row[f'plasmodium_detection_{tax}'] in {
+            'contamination_only',
+            'P1_only',
+            'P2_only',
+            'not_detected',
+        }:
             return ''
 
-        spp = set()
-        for t in targets:
-            tsp = set(sum_samples_row[f'{t}_species_assignments_pass'].split(';'))
-            # locov only included when pass of same species is present, skip
-            # tsp = tsp.union(set(sum_samples_row[f'{t}_species_assignments_locov'].split(';')))
-            tsp = tsp - set([''])
-            spp = spp.union(tsp)
+        calls = set()
+        for t in PLASM_TARGETS:
+            calls |= _split_set(row[f'{t}_{tax}_pass'])
 
-        return ';'.join(spp)
+        return ';'.join(calls)
 
-    sum_samples_df['plasmodium_species'] = sum_samples_df.apply(consensus_species, axis=1)
+    for tax in ['species', 'group']:
+        sum_samples_df[f'plasmodium_detection_{tax}'] = (
+            sum_samples_df.apply(lambda row: infer_status(row, tax=tax), axis=1)
+        )
+        sum_samples_df[f'plasmodium_consensus_{tax}'] = (
+            sum_samples_df.apply(lambda row: consensus_call(row, tax=tax), axis=1)
+        )
 
     return sum_samples_df
+
+def plot_plate_view(plasm_df, out_fn, reference_colours, lims_plate=True, title=None):
+
+    from bokeh.plotting import figure, output_file, save
+    from bokeh.models import ColumnDataSource, Span
+    from bokeh.transform import factor_cmap
+    from bokeh.models.tools import HoverTool
+    from bokeh.transform import dodge
+
+    '''
+    Plots interactive plate map with plasmodium annotations
+    '''
+    plasm_df = plasm_df.copy()
+
+    # set the output filename
+    output_file(out_fn)
+
+    #extract the column and generate the row values
+    if lims_plate:
+        cols = list('ABCDEFGHIJKLMNOP')
+        rows = [str(x) for x in range(1, 25)]
+        plasm_df['col'] = plasm_df['lims_well_id'].str[0]
+        plasm_df['row'] = plasm_df['lims_well_id'].str[1:]
+    else:
+        cols = list('ABCDEFGH')
+        rows = [str(x) for x in range(1, 13)]
+        plasm_df['col'] = plasm_df['well_id'].str[0]
+        plasm_df['row'] = plasm_df['well_id'].str[1:]
+
+    # display values
+    plasm_df['P1_seqids_disp'] = plasm_df['P1_seqids_pass'].str.replace(';.*', '...', regex=True)
+    plasm_df['P2_seqids_disp'] = plasm_df['P2_seqids_pass'].str.replace(';.*', '...', regex=True)
+    plasm_df['comb_seqids_disp'] = plasm_df['P1_seqids_disp'] + '\n' + plasm_df['P2_seqids_disp']
+
+    # additional colours for plotting
+    plasm_df['colour_group'] = plasm_df['plasmodium_consensus_group'].fillna('')
+    plasm_df.loc[plasm_df['plasmodium_consensus_group'].str.contains(','), 'colour_group'] = 'mixed_infection'
+    plasm_df.loc[plasm_df['plasmodium_detection_group'] == 'contamination_only', 'colour_group'] = 'contamination_only'
+
+    reference_colours[''] = '#ffffff'
+    reference_colours['mixed_infection'] = '#cfcfcf'
+    reference_colours['contamination_only'] = '#dfdfdf'
+
+    #load the dataframe into the source
+    source = ColumnDataSource(plasm_df)
+
+    #set up the figure
+    p = figure(
+        width=(1300 if lims_plate else 900),
+        height=(600 if lims_plate else 400),
+        title=title,
+        x_range=rows,
+        y_range=list(reversed(cols)),
+        toolbar_location=None,
+        tools=[HoverTool(), 'pan', 'wheel_zoom', 'reset']
+        )
+
+    # add grid lines
+    for v in range(len(rows)):
+        line_width = 2 if (v % 2 == 0 and lims_plate) else 1
+        vline = Span(location=v, dimension='height', line_color='black', line_width=line_width)
+        p.renderers.extend([vline])
+
+    for h in range(len(cols)):
+        line_width = 2 if (h % 2 == 0 and lims_plate) else 1
+        hline = Span(location=h, dimension='width', line_color='black', line_width=line_width)
+        p.renderers.extend([hline])
+    
+    #add the rectangles
+    p.rect(
+        'row',
+        'col',
+        0.95,
+        0.95,
+        source=source,
+        fill_alpha=.9,
+        legend_field='colour_group',
+        color=factor_cmap('colour_group', palette=list(reference_colours.values()), factors=list(reference_colours.keys()))
+        )
+
+    #add the species count text for each field
+    text_props = {'source': source, 'text_align': 'left', 'text_baseline': 'middle'}
+    x = dodge('row', -0.4, range=p.x_range)
+    r = p.text(x=x, y='col', text='comb_seqids_disp', **text_props)
+    r.glyph.text_font_size = '10px'
+    r.glyph.text_font_style = 'bold'
+
+    #set up the hover value
+    p.add_tools(HoverTool(tooltips=[
+        ('sample id', '@{sample_id}'),
+        ('Parasite group', '@plasmodium_consensus_group'),
+        ('Parasite species', '@plasmodium_consensus_species'),
+        ('Species detection status', '@plasmodium_detection_species'),
+        ('P1 total reads', '@P1_reads_total'),
+        ('P1 QC pass reads', '@P1_reads_pass'),
+        ('P1 QC pass haplotype IDs', '@P1_seqids_pass'),
+        ('P1 reads per QC pass haplotype', '@P1_seqids_pass_reads'),
+        ('P1 species assignments for pass haplotypes', '@P1_species_pass'),
+        ('P1 contamination haplotype IDs', '@P1_seqids_contam'),
+        ('P1 reads per contamination haplotype', '@P1_seqids_contam_reads'),
+        ('P1 low coverage haplotype IDs', '@P1_seqids_locov'),
+        ('P1 reads per low coverage haplotype', '@P1_seqids_locov_reads'),
+        ('P2 total reads', '@P2_reads_total'),
+        ('P2 QC pass reads', '@P2_reads_pass'),
+        ('P2 QC pass haplotype IDs', '@P2_seqids_pass'),
+        ('P2 reads per QC pass haplotype', '@P2_seqids_pass_reads'),
+        ('P2 species assignments for pass haplotypes', '@P2_species_pass'),
+        ('P2 contamination haplotype IDs', '@P2_seqids_contam'),
+        ('P2 reads per contamination haplotype', '@P2_seqids_contam_reads'),
+        ('P2 low coverage haplotype IDs', '@P2_seqids_locov'),
+        ('P2 reads per low coverage haplotype', '@P2_seqids_locov_reads'),
+    ]))
+
+    #set up the rest of the figure and save the plot
+    p.outline_line_color = 'black'
+    p.grid.grid_line_color = None
+    p.axis.axis_line_color = 'black'
+    p.axis.major_tick_line_color = None
+    p.axis.major_label_standoff = 0
+    p.legend.orientation = 'vertical'
+    p.legend.click_policy='hide'
+    p.add_layout(p.legend[0], 'right') 
+    save(p)
 
 def plasm(args):
 
     # Set up logging and create output directories
     setup_logging(verbose=args.verbose)
+
+    # reference checks
+    logging.info('Checking plasm reference data')
+    reference_path = os.path.abspath(args.reference_path.rstrip('/'))
+    reference_version = reference_path.split('/')[-1]
+    assert os.path.isdir(reference_path), f'reference directory does not exist at {reference_path}'
+    assert re.match(r'^plasmv\d', reference_version), f'{reference_version} not recognised as plasm ref version'
+    sintax_dbs = {}
+    for tgt in PLASM_TARGETS:
+        sintax_db_path = f'{reference_path}/sintax_db_{tgt}.fasta'
+        assert os.path.isfile(sintax_db_path), f'SINTAX database does not exist at {sintax_db_path}'
+        sintax_dbs[tgt] = sintax_db_path
+    sintax_ranks = pd.read_csv(f'{reference_path}/sintax_ranks.tsv', sep='\t', index_col=0)['plasm_rank'].to_dict()
+    reference_colours = pd.read_csv(f'{reference_path}/plasm_colours.tsv', sep='\t', index_col=0)['colour'].to_dict()
 
     os.makedirs(args.outdir, exist_ok=True)
 
@@ -291,69 +411,85 @@ def plasm(args):
     run_id, comb_stats_df = prep_comb_stats(args.stats)
 
     plasm_hap_df = hap_df[hap_df['target'].isin(PLASM_TARGETS)].copy()
+
+    sintax_dfs = []
+    for tgt in PLASM_TARGETS:
+        tgt_plasm_hap_df = plasm_hap_df.query('target == @tgt')
+        uniq_tgt_plasm_hap_df = tgt_plasm_hap_df[['seqid','consensus']].drop_duplicates()
+        if uniq_tgt_plasm_hap_df.shape[0] == 0:
+            logging.info(f'no {tgt} haplotypes, skipping SINTAX')
+            sintax_dfs.append(pd.DataFrame())
+            continue
+        uniq_tgt_plasm_hap_fa = f'{args.outdir}/raw_{tgt}_haps.fa'
+        logging.info(f'writing unique {tgt} haplotypes to {uniq_tgt_plasm_hap_fa}')
+        hap_to_fa(uniq_tgt_plasm_hap_df, uniq_tgt_plasm_hap_fa)
+
+        tgt_sintax_tsv = f'{args.outdir}/sintax_out_{tgt}.tsv'
+        tgt_sintax_log = f'{args.outdir}/sintax_out_{tgt}.log'
+        logging.info(f'running SINTAX assignment for {uniq_tgt_plasm_hap_fa} against {sintax_dbs[tgt]}, writing to {tgt_sintax_tsv}')
+        o, e = run_vsearch_sintax(
+            uniq_tgt_plasm_hap_fa,
+            sintax_dbs[tgt],
+            tgt_sintax_tsv,
+            threads=1
+        )
+        with open(tgt_sintax_log, 'w') as log:
+            log.write(e)
+
+        sintax_df = parse_sintax(tgt_sintax_tsv, sintax_ranks)
+        sintax_df['target'] = tgt
+        sintax_dfs.append(sintax_df)
     
-    reference_path = args.reference_path.rstrip('/')
+    sintax_df = pd.concat(sintax_dfs)
 
-    reference_version = reference_path.split('/')[-1]
+    if sintax_df.shape[0] > 0:
+        annotated_hap_df = pd.merge(plasm_hap_df, sintax_df, on=['seqid','target'])
+        annotated_hap_df.to_csv(f'{args.outdir}/plasm_hap_summary.tsv', sep='\t', index=False)
+    else:
+        logging.warning('no Plasmodium haplotypes to annotate, terminating')
+        return
 
-    assert re.match(r'^plasmv\d', reference_version), f'{reference_version} not recognised as plasm ref version'
+    if args.estimate_contamination:
+        logging.info('estimating cross-contamination')
+        annotated_hap_df = estimate_contamination(
+            annotated_hap_df,
+            comb_stats_df,
+            min_reads_source=args.contam_min_reads_source,
+            min_samples_affected=args.contam_min_samples_affected,
+            min_cov_ratio=args.contam_min_cov_ratio,
+        )
+    else:
+        logging.info('skipping cross-contamination analysis')
+        annotated_hap_df['contamination_status'] = ''
+        annotated_hap_df['contamination_confidence'] = ''
 
-    assert os.path.isdir(reference_path), f'reference version {reference_version} does not exist at {reference_path}'
 
+    annotated_sample_df = summarise_samples(
+        annotated_hap_df, 
+        comb_stats_df,
+        filters=(args.filter_p1, args.filter_p2),
+    )
+    annotated_sample_df['plasm_ref'] = reference_version
+    annotated_sample_df.to_csv(f'{args.outdir}/plasm_sample_summary.tsv', sep='\t', index=False)
 
-    if plasm_hap_df.shape[0] > 0:
-        blastdb = f'{reference_path}/{args.blast_db_prefix}'
-
-        blast_df = run_blast(
-            plasm_hap_df, 
-            args.outdir, 
-            blastdb,
-            args.blast_min_pident,
-            args.blast_min_qcov
-            )
-
-        contam_df = estimate_contamination(
-            plasm_hap_df, comb_stats_df,
-            min_samples=args.contam_min_samples_affected, 
-            min_source_reads=args.contam_min_reads_source, 
-            max_affected_reads=args.contam_max_reads_affected
-            )
-
-        sum_hap_df = summarise_haplotypes(hap_df, blast_df, contam_df)
-
-    # no plasmodium sequences in run - empty hap df
-    else: 
-        sum_hap_df = pd.DataFrame(columns=SUM_HAP_COLS)
-
-    sum_hap_df.to_csv(f'{args.outdir}/plasm_hap_summary.tsv', sep='\t', index=False)
-
-    sum_samples_df = summarise_samples(sum_hap_df, comb_stats_df, filters=(args.filter_p1, args.filter_p2))
-
-    sum_samples_df['plasm_ref'] = reference_version
-
-    out_df = sum_samples_df.drop(columns=[
-        'sample_name',
-        'lims_plate_id',
-        'lims_well_id',
-        'plate_id',
-        'well_id',
-        'P1_reads_total',
-        'P2_reads_total'
-    ]).copy()
-
-    out_df.columns = out_df.columns.str.lower()
-
-    out_df.to_csv(f'{args.outdir}/plasm_assignment.tsv', sep='\t')
 
     if args.interactive_plotting:
-        for lims_plate in sum_samples_df.lims_plate_id.unique():
 
-            logging.info(f'plotting interactive lims plate view for {lims_plate}')
+        for plate in annotated_sample_df.plate_id.unique():
+
+            logging.info(f'plotting interactive plate view for {plate}')
             
-            out_fn = f'{args.outdir}/plasm_{lims_plate}.html'
-            title = f'Plasmodium species composition run {run_id}, plate {lims_plate}'
-            plot_df = sum_samples_df[sum_samples_df.lims_plate_id == lims_plate]
-            plot_plate_view(plot_df, out_fn, reference_path, title)
+            out_fn = f'{args.outdir}/plasm_plate_{plate}.html'
+            title = f'Plasmodium species composition run {run_id}, plate {plate}'
+            plot_df = annotated_sample_df[annotated_sample_df.plate_id == plate]
+            plot_plate_view(plot_df, out_fn, reference_colours, lims_plate=False, title=title)
+        for lims_plate in annotated_sample_df.lims_plate_id.unique():
+            logging.info(f'plotting interactive plate view for LIMS plate {lims_plate}')
+            
+            out_fn = f'{args.outdir}/plasm_lims_plate_{lims_plate}.html'
+            title = f'Plasmodium species composition run {run_id}, LIMS plate {lims_plate}'
+            plot_df = annotated_sample_df[annotated_sample_df.lims_plate_id == lims_plate]
+            plot_plate_view(plot_df, out_fn, reference_colours, lims_plate=True, title=title)
 
     logging.info('ANOSPP plasm complete')
 
@@ -362,38 +498,31 @@ def plasm(args):
 
 def main():
 
-    parser = argparse.ArgumentParser("Plasmodium ID assignment for ANOSPP data")
+    parser = argparse.ArgumentParser("Plasmodium species assignment for ANOSPP data")
     parser.add_argument('-a', '--haplotypes', help='Haplotypes tsv file generated by prep', required=True)
     parser.add_argument('-s', '--stats', help='Comb stats tsv file generated by prep', required=True)
+    parser.add_argument('-o', '--outdir', help='Output directory. Default: plasm', default='plasm')
     parser.add_argument('-r', '--reference_path', 
-                        help='Path to plasm reference directory, expected to end with e.g. plasmv1', 
+                        help='Path to plasm reference directory containing SiNTAX reference fasta for each amplicon and colour scheme', 
                         required=True)
-    parser.add_argument('-o', '--outdir', help='Output directory. Default: qc', default='plasm')
-    parser.add_argument('--blast_db_prefix', 
-                        help='Blast database prefix in reference index', 
-                        default='plasmomito_P1P2_DB_v1.0')
-    parser.add_argument('--blast_min_pident', 
-                        help=('Minimum blast percent identity for haplotype assignment to species. '
-                              'Default: 99 - corresponds to 2 SNPs or indels per ~210bp target'),
-                        default=99, type=float)
-    parser.add_argument('--blast_min_qcov', 
-                        help='Minimum blast alignment query coverage for haplotype assignment to species. Default: 96',  
-                        default=96, type=int)
-    parser.add_argument('--contam_min_reads_source', 
-                        help='Minimum number of reads in a source sample for same plate/well contamination. Default: 10000',  
-                        default=10000, type=int)
-    parser.add_argument('--contam_max_reads_affected', 
-                        help='Maximum number of reads in a sample affected by same plate/well contamination. Default: 10000',  
-                        default=100, type=int)
-    parser.add_argument('--contam_min_samples_affected', 
-                        help='Minimum number of samples affected by plate/well contamination to be considered. Default: 4',  
-                        default=4, type=int)
     parser.add_argument('-f', '--filter_p1',
                         help='Minimum read support for P1 haplotypes to be included in sample summary. Default: 10',
                         default=10, type=int)
     parser.add_argument('-g', '--filter_p2', 
                         help='Minimum read support for P2 haplotypes to be included in sample summary. Default: 10', 
                         default=10, type=int)
+    parser.add_argument('-e','--estimate_contamination', 
+                        help='Perform plate/well based contamination removal optimised for ANOSPP Illumina workflow. Disabled by default', 
+                        action='store_true')
+    parser.add_argument('--contam_min_reads_source', 
+                        help='Minimum number of reads in a source sample for same plate/well contamination. Default: 10000',  
+                        default=10000, type=int)
+    parser.add_argument('--contam_min_samples_affected', 
+                        help='Minimum number of samples affected by plate/well contamination to be considered. Default: 4',  
+                        default=4, type=int)
+    parser.add_argument('--contam_min_cov_ratio', 
+                        help='Maximum coverage ratio between source and target of contamination. Default: 100',  
+                        default=100, type=float)
     parser.add_argument('-i', '--interactive_plotting', 
                         help='Create interactive plots of species composition across plates', 
                         action='store_true', default=False)

@@ -167,6 +167,13 @@ def prep_hap(hap_fn, anospp=True):
 
     return hap_df
 
+def hap_to_fa(hap_df, out_fa):
+
+    with open(out_fa, 'w') as output:
+        for _, row in hap_df.iterrows():
+            output.write(f">{row['seqid']}\n")
+            output.write(f"{row['consensus']}\n")
+
 def prep_comb_stats(comb_stats_fn, anospp=True):
 
     logging.info(f'loading combined stats table from {comb_stats_fn}')
