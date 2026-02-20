@@ -7,8 +7,10 @@ from scipy.optimize import curve_fit
 import math
 import os
 import argparse
+import logging
+import pandas as pd
 
-from anospp_analysis.util import *
+from anospp_analysis.util import setup_logging, prep_comb_stats, prep_hap, well_ordering, human_format, MOSQ_TARGETS, CUTADAPT_TARGETS
 
 def plot_target_balance(hap_df, run_id):
 
@@ -515,6 +517,7 @@ def qc(args):
         fig, _ = plot_plasm_balance(comb_stats_df, run_id)
         fig.savefig(f'{args.outdir}/plasm_balance.png')
     else:
+        # enabled for non-ANOSPP data, untested
         fig, _, _, _ = plot_het_cov(hap_df, title='Total', run_id=run_id)
         fig.savefig(f'{args.outdir}/het_cov.png')
 

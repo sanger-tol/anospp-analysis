@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import logging
 import os
 import re
 
@@ -10,7 +11,7 @@ import argparse
 import keras
 from scipy.spatial import ConvexHull, Delaunay
 
-from anospp_analysis.util import *
+from anospp_analysis.util import setup_logging
 from anospp_analysis.nn import parse_seqids_series, construct_unique_kmer_table
 
 #Variables

@@ -6,8 +6,9 @@ import os
 import re
 import argparse
 import itertools
+import logging
 
-from anospp_analysis.util import *
+from anospp_analysis.util import MOSQ_TARGETS, setup_logging, well_ordering
 from anospp_analysis.qc import plot_het_cov
 
 def prep_mosquito_haps(hap_df, rc_threshold, rf_threshold):

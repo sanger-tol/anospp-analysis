@@ -3,8 +3,9 @@ import argparse
 import subprocess
 import glob
 import os
+import logging
 
-from .util import *
+from anospp_analysis.util import seqid_generator, setup_logging, well_id_mapper, lims_well_id_mapper, CUTADAPT_TARGETS, MOSQ_TARGETS, PLASM_TARGETS
 
 # optimised cutadapt args
 CUTADAPT_ARGS = '-O 10 --match-read-wildcards'

@@ -79,11 +79,14 @@ def seqid_generator(hap_df):
     assign identifiers to unique haplotypes
     '''
 
-    seqids = dict()
-    for tgt, group in hap_df.groupby('target'):
-        for (i, cons) in enumerate(group['consensus'].unique()):
-            seqids[tgt + cons] = '{}-{}'.format(tgt, i)
-    hap_df['seqid'] = (hap_df.target + hap_df.consensus).replace(seqids)
+    hap_df['seqid'] = (
+        hap_df
+        .drop_duplicates(['target', 'consensus'])
+        .assign(idx=lambda d: d.groupby('target').cumcount())
+        .assign(seqid=lambda d: d['target'] + '-' + d['idx'].astype(str))
+        .merge(hap_df[['target', 'consensus']], on=['target', 'consensus'], how='right')
+        ['seqid']
+    )
 
     return hap_df
 
