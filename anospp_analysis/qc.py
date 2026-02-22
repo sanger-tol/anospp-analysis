@@ -10,7 +10,7 @@ import argparse
 import logging
 import pandas as pd
 
-from anospp_analysis.util import setup_logging, prep_comb_stats, prep_hap, well_ordering, human_format, MOSQ_TARGETS, CUTADAPT_TARGETS
+from anospp_analysis.util import setup_logging, load_comb_stats, load_hap, well_ordering, human_format, MOSQ_TARGETS, CUTADAPT_TARGETS
 
 def plot_target_balance(hap_df, run_id):
 
@@ -465,9 +465,9 @@ def qc(args):
     
     logging.info('ANOSPP QC data import')
 
-    hap_df = prep_hap(args.haplotypes)
+    hap_df = load_hap(args.haplotypes)
     
-    run_id, comb_stats_df = prep_comb_stats(args.stats)
+    run_id, comb_stats_df = load_comb_stats(args.stats)
     
     logging.info('plotting QC')
     

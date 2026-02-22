@@ -8,7 +8,7 @@ import argparse
 import itertools
 import logging
 
-from anospp_analysis.util import MOSQ_TARGETS, setup_logging, well_ordering
+from anospp_analysis.util import MOSQ_TARGETS, setup_logging, well_ordering, load_hap, load_comb_stats
 from anospp_analysis.qc import plot_het_cov
 
 def prep_mosquito_haps(hap_df, rc_threshold, rf_threshold):
@@ -647,8 +647,8 @@ def nn(args):
 
     logging.info('ANOSPP NN data import started')
 
-    hap_df = prep_hap(args.haplotypes)
-    run_id, comb_stats_df = prep_comb_stats(args.stats)
+    hap_df = load_hap(args.haplotypes)
+    run_id, comb_stats_df = load_comb_stats(args.stats)
     
     logging.info(f'starting NN assignment for {comb_stats_df.sample_id.nunique()} samples in run {run_id}')
     mosq_hap_df = prep_mosquito_haps(

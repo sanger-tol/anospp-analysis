@@ -5,7 +5,7 @@ import logging
 import pandas as pd
 pd.set_option('future.no_silent_downcasting', True)
 
-from anospp_analysis.util import prep_hap, prep_comb_stats, setup_logging, hap_to_fa, PLASM_TARGETS
+from anospp_analysis.util import load_hap, load_comb_stats, setup_logging, hap_to_fa, PLASM_TARGETS
 from anospp_analysis.vsearch import run_vsearch_sintax
 
 def parse_sintax(sintax_tsv, ranks):
@@ -420,8 +420,8 @@ def plasm(args):
     os.makedirs(args.outdir, exist_ok=True)
 
     logging.info('ANOSPP plasm data import started')
-    hap_df = prep_hap(args.haplotypes)
-    run_id, comb_stats_df = prep_comb_stats(args.stats)
+    hap_df = load_hap(args.haplotypes)
+    run_id, comb_stats_df = load_comb_stats(args.stats)
 
     plasm_hap_df = hap_df[hap_df['target'].isin(PLASM_TARGETS)].copy()
 
