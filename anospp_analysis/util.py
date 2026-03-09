@@ -187,4 +187,6 @@ def load_comb_stats(comb_stats_fn):
 
     run_id = comb_stats_df['run_id'].iloc[0]
 
+    assert comb_stats_df['sample_id'].is_unique, f'duplicate sample_id in {comb_stats_fn}'
+
     return run_id, comb_stats_df
