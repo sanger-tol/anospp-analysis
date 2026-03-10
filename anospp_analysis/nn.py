@@ -511,7 +511,7 @@ def plot_assignment_proportions(comb_stats_df, nn_level_result_df, level_label, 
 
     # plasm color scheme - applied to bottom ticks
     if plasm_assignment_df is not None and plasm_colors is not None:
-        logging.info(f'using plasm predictions to colour sample labels')
+        logging.info('using plasm predictions to colour sample labels')
         plasm_assignment_df['plasmodium_species'] = plasm_assignment_df['plasmodium_species'].fillna('')
         plasm_spp = plasm_assignment_df.set_index('sample_id')['plasmodium_species'].to_dict()
         assert set(plasm_spp.keys()) == set(comb_stats_df.sample_id), \
@@ -663,17 +663,16 @@ def nn(args):
         
     nn_hap_fn = f'{args.outdir}/nn_hap_summary.tsv'
     nndict_fn = f'{args.outdir}/nn_dist_to_ref.tsv'
-    if args.resume and os.path.isfile(nndict_fn):
+    if args.resume and os.path.isfile(nndict_fn) and os.path.isfile(nn_hap_fn):
         logging.warning(f'reading nndict from {nndict_fn}')
         nndict = {}
         with open(nndict_fn) as f:
             next(f)
             for line in f:
-                ll = line.strip().split('\t')
-                if len(ll) == 3:
-                    nndict[ll[0]] = ([int(i) for i in ll[1].split('|')], float(ll[2]))
+                fields = line.strip().split('\t')
+                if len(fields) == 3:
+                    nndict[fields[0]] = ([int(i) for i in fields[1].split('|')], float(fields[2]))
         
-    if args.resume and os.path.isfile(nn_hap_fn):
         logging.warning(f'reading annotated haplotype data from {nn_hap_fn}')
         non_error_hap_df = pd.read_csv(nn_hap_fn, sep='\t')
     else:
@@ -684,19 +683,18 @@ def nn(args):
         non_error_hap_df = mosq_hap_df[~mosq_hap_df.seqid.isin(error_seqs)]
         non_error_hap_df = recompute_haplotype_coverage(non_error_hap_df)
         
-        if not args.resume or not os.path.isfile(nndict_fn):
-            nndict = find_nn_unique_haps(non_error_hap_df, kmers, ref_hap_df, ref_kmers)
-            nn_df = pd.DataFrame.from_dict(nndict, orient='index', columns=['nn_id_array', 'nn_dist'])
-            nn_df['nn_id'] = ['|'.join(map(str, l)) for l in nn_df.nn_id_array]
-            nn_df.index.name = 'seqid'
-            nn_df[['nn_id', 'nn_dist']].to_csv(
-                nndict_fn, 
-                sep='\t',
-                index=True
-                )
-        nn_hap_df = add_nn_to_haplotypes(non_error_hap_df, nndict, ref_hap_df)
+        nndict = find_nn_unique_haps(non_error_hap_df, kmers, ref_hap_df, ref_kmers)
+        nn_df = pd.DataFrame.from_dict(nndict, orient='index', columns=['nn_id_array', 'nn_dist'])
+        nn_df['nn_id'] = ['|'.join(map(str, nn_id)) for nn_id in nn_df.nn_id_array]
+        nn_df.index.name = 'seqid'
+        nn_df[['nn_id', 'nn_dist']].to_csv(
+            nndict_fn, 
+            sep='\t',
+            index=True
+            )
+        non_error_hap_df = add_nn_to_haplotypes(non_error_hap_df, nndict, ref_hap_df)
         logging.info(f'writing annotated haplotypes to {nn_hap_fn}')
-        nn_hap_df.to_csv(nn_hap_fn, index=False, sep='\t')
+        non_error_hap_df.to_csv(nn_hap_fn, index=False, sep='\t')
 
     nn_assignment_fn = f'{args.outdir}/nn_assignment.tsv'
     if args.resume and os.path.isfile(nn_assignment_fn):
