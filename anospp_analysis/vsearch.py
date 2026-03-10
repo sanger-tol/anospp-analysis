@@ -1,5 +1,6 @@
 import subprocess
 from pathlib import Path
+import pandas as pd
 
 def run_command(cmd):
     """
@@ -87,3 +88,45 @@ def run_vsearch_cluster_fast(
         cmd.extend(["--threads", str(threads)])
 
     return run_command(cmd)
+
+def parse_sintax(sintax_tsv, ranks):
+
+    df = pd.read_csv(sintax_tsv, sep="\t", names=["seqid", "taxonomy", "strand"])
+    
+    tax = (
+        df[["seqid", "taxonomy"]]
+        .assign(taxonomy=lambda x: x["taxonomy"].str.split(","))
+        .explode("taxonomy")
+        .assign(taxonomy=lambda x: x["taxonomy"].str.strip())
+        .assign(
+            rank=lambda x: x["taxonomy"].str.extract(r"^(\w):"),
+            name=lambda x: x["taxonomy"].str.extract(r":(.+)\(")[0],
+            bootstrap=lambda x: x["taxonomy"].str.extract(r"\(([\d.]+)\)")[0].astype(float),
+        )
+    )
+    
+    tax["rank"] = tax["rank"].map(ranks)
+    
+    wide = (
+        tax
+        .pivot(index="seqid", columns="rank", values="name")
+        .join(
+            tax.pivot(index="seqid", columns="rank", values="bootstrap")
+            .add_suffix("_bootstrap")
+        )
+    )
+    
+    df = df.merge(wide, left_on="seqid", right_index=True)
+
+    out_cols = [
+        'seqid',
+        'strand'
+    ] 
+    for r in ranks.values():
+        out_cols.extend([r, r + '_bootstrap'])
+    
+    for col in out_cols:
+        if col not in df.columns:
+            df[col] = ''
+
+    return df[out_cols].copy()

@@ -5,51 +5,9 @@ import logging
 import pandas as pd
 
 from anospp_analysis.util import load_hap, load_comb_stats, setup_logging, hap_to_fa, PLASM_TARGETS
-from anospp_analysis.vsearch import run_vsearch_sintax
+from anospp_analysis.vsearch import run_vsearch_sintax, parse_sintax
 
 pd.set_option('future.no_silent_downcasting', True)
-
-def parse_sintax(sintax_tsv, ranks):
-
-    df = pd.read_csv(sintax_tsv, sep="\t", names=["seqid", "taxonomy", "strand"])
-    
-    tax = (
-        df[["seqid", "taxonomy"]]
-        .assign(taxonomy=lambda x: x["taxonomy"].str.split(","))
-        .explode("taxonomy")
-        .assign(taxonomy=lambda x: x["taxonomy"].str.strip())
-        .assign(
-            rank=lambda x: x["taxonomy"].str.extract(r"^(\w):"),
-            name=lambda x: x["taxonomy"].str.extract(r":(.+)\(")[0],
-            bootstrap=lambda x: x["taxonomy"].str.extract(r"\(([\d.]+)\)")[0].astype(float),
-        )
-    )
-    
-    tax["rank"] = tax["rank"].map(ranks)
-    
-    wide = (
-        tax
-        .pivot(index="seqid", columns="rank", values="name")
-        .join(
-            tax.pivot(index="seqid", columns="rank", values="bootstrap")
-            .add_suffix("_bootstrap")
-        )
-    )
-    
-    df = df.merge(wide, left_on="seqid", right_index=True)
-
-    out_cols = [
-        'seqid',
-        'strand'
-    ] 
-    for r in ranks.values():
-        out_cols.extend([r, r + '_bootstrap'])
-    
-    for col in out_cols:
-        if col not in df.columns:
-            df[col] = ''
-
-    return df[out_cols].copy()
 
 def estimate_contamination(
     hap_df,

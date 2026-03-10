@@ -10,6 +10,31 @@ import logging
 
 from anospp_analysis.util import MOSQ_TARGETS, setup_logging, well_ordering, load_hap, load_comb_stats
 from anospp_analysis.qc import plot_het_cov
+from anospp_analysis.vsearch import run_vsearch_sintax, parse_sintax
+
+def mosq_sintax(hap_df, nn_sintax_ref, nn_sintax_ranks, nn_sintax_outdir):
+
+    os.makedirs(nn_sintax_outdir, exist_ok=True)
+
+    uniq_hap_df = hap_df[~hap_df.seqid.duplicated()]
+    uniq_sintax_fa = f'{nn_sintax_outdir}/uniq_hap.fasta'
+    nhaps = 0
+    with open(uniq_sintax_fa, 'w') as o:
+        for i, r in uniq_hap_df.iterrows():
+            if r.target in MOSQ_TARGETS:
+                nhaps += 1
+                o.write(f'>{r.seqid}\n')
+                o.write(f'{r.consensus}\n')
+    
+    logging.info(f'running SINTAX for {nhaps} mosquito haps')
+
+    sintax_fn = f'{nn_sintax_outdir}/sintax.tsv'
+    run_vsearch_sintax(uniq_sintax_fa, nn_sintax_ref, sintax_fn)
+
+    sintax_df = parse_sintax(sintax_fn, nn_sintax_ranks)
+    expanded_sintax_fn = f'{nn_sintax_outdir}/sintax_expanded.tsv'
+    logging.info(f'writing SINTAX assignments to {expanded_sintax_fn}')
+    sintax_df.to_csv(expanded_sintax_fn, sep='\t', index=False)
 
 def prep_mosquito_haps(hap_df, rc_threshold, rf_threshold):
     '''
@@ -27,7 +52,7 @@ def prep_mosquito_haps(hap_df, rc_threshold, rf_threshold):
         ]
     if filtered_hap_df.shape[0] < hap_df.shape[0]:
         logging.info(
-            f'removed {hap_df.shape[0] - filtered_hap_df.shape[0]} haplotypes '
+            f'removed {hap_df.shape[0] - filtered_hap_df.shape[0]} haplotype instances '
             f'with fewer than {rc_threshold} reads or fraction lower than {rf_threshold} of reads'
         )
     assert filtered_hap_df.shape[0] > 0, 'No haplotypes left after filtering, terminating'
@@ -452,12 +477,6 @@ def generate_summary(comb_stats_df, version_name):
     ]
     return '\n'.join(summary)
 
-def prep_stats_for_plotting(comb_stats_df, locov_rc):
-
-    
-
-    return comb_stats_df
-
 def plot_assignment_proportions(comb_stats_df, nn_level_result_df, level_label, level_colors, run_id, plasm_assignment_df, plasm_colors, args):
     
     logging.info(f'generating {level_label} level plots')
@@ -638,7 +657,6 @@ def plot_assignment_proportions(comb_stats_df, nn_level_result_df, level_label, 
 
     return fig, axs
 
-
 def nn(args):
 
     setup_logging(verbose=args.verbose)
@@ -649,7 +667,22 @@ def nn(args):
 
     hap_df = load_hap(args.haplotypes)
     run_id, comb_stats_df = load_comb_stats(args.stats)
+
+    # SINTAX
+    expanded_sintax_fn = f'{args.outdir}/sintax_prefilter/sintax_expanded.tsv'
+    if os.path.isfile(expanded_sintax_fn):
+        logging.warning(f'SINTAX results found at {expanded_sintax_fn}, skipping SINTAX')
+    else:
+        nn_sintax_ref = f'{args.reference_path}/nn_sintax.fasta'
+        nn_sintax_ranks_fn = f'{args.reference_path}/nn_sintax_ranks.tsv'
+        nn_sintax_outdir = f'{args.outdir}/sintax_prefilter/'
+        if os.path.isfile(nn_sintax_ref) and os.path.isfile(nn_sintax_ranks_fn):
+            nn_sintax_ranks = pd.read_csv(nn_sintax_ranks_fn, sep='\t', index_col=0)['nn_rank'].to_dict()
+            mosq_sintax(hap_df, nn_sintax_ref, nn_sintax_ranks, nn_sintax_outdir)
+        else:
+            logging.warning(f'no SINTAX reference at {nn_sintax_ref}, skipping')
     
+    # mosquito data hard filters
     logging.info(f'starting NN assignment for {comb_stats_df.sample_id.nunique()} samples in run {run_id}')
     mosq_hap_df = prep_mosquito_haps(
         hap_df,
@@ -657,10 +690,12 @@ def nn(args):
         args.hap_reads_fraction_threshold
         )
 
+    # reference data
     ref_hap_df, allele_freqs, true_multi_targets, colors, version_name = prep_reference_index(
         args.reference_path
         )
-        
+    
+    # per-haplotype distance estimation and haplotype annotation
     nn_hap_fn = f'{args.outdir}/nn_hap_summary.tsv'
     nndict_fn = f'{args.outdir}/nn_dist_to_ref.tsv'
     if args.resume and os.path.isfile(nndict_fn) and os.path.isfile(nn_hap_fn):
@@ -696,6 +731,7 @@ def nn(args):
         logging.info(f'writing annotated haplotypes to {nn_hap_fn}')
         non_error_hap_df.to_csv(nn_hap_fn, index=False, sep='\t')
 
+    # sample-level assignments
     nn_assignment_fn = f'{args.outdir}/nn_assignment.tsv'
     if args.resume and os.path.isfile(nn_assignment_fn):
         logging.warning(f'reading nn assignments from {nn_assignment_fn}')
@@ -744,12 +780,14 @@ def nn(args):
             'nn_ref'
         ]].to_csv(nn_assignment_fn, index=False, sep='\t')
     
+    # analysis summary
     summary_text = generate_summary(comb_stats_df, version_name)
     summary_fn = f'{args.outdir}/nn_summary.txt'
     logging.info(f'writing summary file to {summary_fn}')
     with open(summary_fn, 'w') as fn:
         fn.write(summary_text)
 
+    # NN barplots 
     if not args.no_plotting:
 
         fig, _, _, _ = plot_het_cov(non_error_hap_df, title='Mosquito filtered', run_id=run_id)
