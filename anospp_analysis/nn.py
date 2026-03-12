@@ -121,8 +121,14 @@ def prep_reference_index(reference_path):
         else:
             clr = np.load(f'{reference_path}/colors_{level}.npy')
             colors[level] = clr
-        
-    return(ref_hap_df, allele_freqs, true_multi_targets, colors, version_name)
+    
+    level_hierarchy = ref_hap_df[[
+        'fine_sgp','int_sgp','coarse_sgp'
+    ]].drop_duplicates()
+
+    assert level_hierarchy['fine_sgp'].is_unique, 'found duplicate fine level labels in hiearchy, terminating'
+
+    return(ref_hap_df, allele_freqs, true_multi_targets, colors, level_hierarchy, version_name)
 
 def construct_kmer_dict(k):
     '''
@@ -458,6 +464,45 @@ def generate_hard_calls(comb_stats_df, non_error_hap_df, test_samples, results_d
 
     return comb_stats_df
 
+def estimate_fine_ratio(comb_stats_df, results_dfs, level_hierarchy):
+
+    logging.info(f'estimating fine level top two hits assignment ratio')
+
+    ratios = {}
+    for sample_id, r in results_dfs['fine'].iterrows():
+        p_sorted = r.sort_values(ascending=False)
+        top_hit = p_sorted.index[0]
+        top_hit_prop = p_sorted[top_hit]
+        top_hit_group = level_hierarchy.loc[level_hierarchy['fine_sgp'] == top_hit, 'int_sgp'].iloc[0]
+        top_hit_group_members = level_hierarchy.loc[level_hierarchy['int_sgp'] == top_hit_group, 'fine_sgp'].to_list()
+        if len(top_hit_group_members) == 1:
+            # logging.info(f'{top_hit} is the only fine label in int group {top_hit_group}, using coarse group for ratio')
+            top_hit_group = level_hierarchy.loc[level_hierarchy['fine_sgp'] == top_hit, 'coarse_sgp'].iloc[0]
+            top_hit_group_members = level_hierarchy.loc[level_hierarchy['coarse_sgp'] == top_hit_group, 'fine_sgp'].to_list()
+        if len(top_hit_group_members) == 1:
+            logging.warning(f'no other fine level labels in int or coarse for {top_hit}, skipping ratio')
+            continue
+        for i in range(1, len(p_sorted)):
+            second_hit = p_sorted.index[i]
+            if second_hit in top_hit_group_members:
+                second_hit_prop = p_sorted[second_hit]
+                ratio = top_hit_prop / second_hit_prop
+                break
+        else:
+            logging.warning(f'no concordant second hit found for {top_hit} ({top_hit_prop}) in {sample_id}, skipping ratio')
+            continue
+        ratios[sample_id] = {
+            'fine_top_hit': top_hit,
+            'fine_second_hit': second_hit,
+            'fine_ratio': ratio
+        }
+    ratios_df = pd.DataFrame.from_dict(ratios, orient='index')
+    ratios_df['fine_ratio'] = ratios_df['fine_ratio'].round(3)
+
+    comb_stats_df = comb_stats_df.merge(ratios_df, left_on='sample_id', right_index=True, how='left')
+
+    return comb_stats_df
+
 def generate_summary(comb_stats_df, version_name):
 
     summary = [
@@ -670,7 +715,7 @@ def nn(args):
 
     # SINTAX
     expanded_sintax_fn = f'{args.outdir}/sintax_prefilter/sintax_expanded.tsv'
-    if os.path.isfile(expanded_sintax_fn):
+    if args.resume and os.path.isfile(expanded_sintax_fn):
         logging.warning(f'SINTAX results found at {expanded_sintax_fn}, skipping SINTAX')
     else:
         nn_sintax_ref = f'{args.reference_path}/nn_sintax.fasta'
@@ -682,8 +727,8 @@ def nn(args):
         else:
             logging.warning(f'no SINTAX reference at {nn_sintax_ref}, skipping')
     
-    # mosquito data hard filters
     logging.info(f'starting NN assignment for {comb_stats_df.sample_id.nunique()} samples in run {run_id}')
+    # mosquito data hard filters
     mosq_hap_df = prep_mosquito_haps(
         hap_df,
         args.hap_read_count_threshold,
@@ -691,7 +736,7 @@ def nn(args):
         )
 
     # reference data
-    ref_hap_df, allele_freqs, true_multi_targets, colors, version_name = prep_reference_index(
+    ref_hap_df, allele_freqs, true_multi_targets, colors, level_hierarchy, version_name = prep_reference_index(
         args.reference_path
         )
     
@@ -736,7 +781,7 @@ def nn(args):
     if args.resume and os.path.isfile(nn_assignment_fn):
         logging.warning(f'reading nn assignments from {nn_assignment_fn}')
         nn_stats_df = pd.read_csv(nn_assignment_fn, sep='\t')
-        comb_stats_df = pd.merge(comb_stats_df, nn_stats_df, on='sample_id', how='left')
+        comb_stats_df = pd.merge(comb_stats_df, nn_stats_df, on=['sample_id','run_id'], how='left')
         results_dfs = {}
         for level in ['coarse', 'int', 'fine']:
             level_assignment_fn = f'{args.outdir}/assignment_{level}.tsv'
@@ -763,22 +808,33 @@ def nn(args):
             nn_asgn_threshold=args.nn_assignment_threshold
         )
 
+        
+
         comb_stats_df['nn_ref'] = version_name
-        logging.info(f'writing assignment results to {nn_assignment_fn}')
-        comb_stats_df[[
-            'sample_id',
-            'run_id',
-            'multiallelic_mosq_targets',
-            'mosq_reads',
-            'mosq_targets_recovered',
-            'nn_assignment',
-            'nn_coarse',
-            'nn_int',
-            'nn_fine',
-            'nn_species_call',
-            'nn_call_method',
-            'nn_ref'
-        ]].to_csv(nn_assignment_fn, index=False, sep='\t')
+
+    comb_stats_df = estimate_fine_ratio(
+            comb_stats_df,
+            results_dfs,
+            level_hierarchy
+        )
+    logging.info(f'writing assignment results to {nn_assignment_fn}')
+    comb_stats_df[[
+        'sample_id',
+        'run_id',
+        'multiallelic_mosq_targets',
+        'mosq_reads',
+        'mosq_targets_recovered',
+        'fine_top_hit',
+        'fine_second_hit',
+        'fine_ratio',
+        'nn_assignment',
+        'nn_coarse',
+        'nn_int',
+        'nn_fine',
+        'nn_species_call',
+        'nn_call_method',
+        'nn_ref'
+    ]].to_csv(nn_assignment_fn, index=False, sep='\t')
     
     # analysis summary
     summary_text = generate_summary(comb_stats_df, version_name)
