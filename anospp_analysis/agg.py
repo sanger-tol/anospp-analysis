@@ -20,7 +20,7 @@ def validate_aggregation(comb_df):
         'unassigned_asvs', 'targets_recovered', 'raw_mosq_targets_recovered',
         'raw_multiallelic_mosq_targets', 'raw_mosq_reads', 'p1_reads', 'p2_reads', 
         'p1_reads_pass', 'p2_reads_pass', 'p1_reads_contam', 'p2_reads_contam', 'p1_reads_locov', 'p2_reads_locov',
-        'plasm_detection_group', 'plasm_detection_species', 'plasm_ref',
+        'plasm_status', 'plasm_ref',
         # skip plasm hap
         'multiallelic_mosq_targets', 'mosq_reads', 'mosq_targets_recovered',
         'nn_assignment', 'nn_species_call', 'nn_call_method', 'nn_ref',
@@ -162,8 +162,8 @@ def main():
                         help='path to VAE assignment tsv. Default: vae/vae_assignment.tsv',
                         default='vae/vae_assignment.tsv')
     parser.add_argument('-p', '--plasm', 
-                        help='path to plasm assignment tsv. Default: plasm/plasm_assignment.tsv',
-                        default='plasm/plasm_assignment.tsv')
+                        help='path to plasm assignment tsv. Default: plasmv2/plasm_assignment.tsv',
+                        default='plasmv2/plasm_assignment.tsv')
     parser.add_argument('-o', '--out', 
                         help='Output aggregated sample metadata tsv. Default: anospp_results.tsv', 
                         default='anospp_results.tsv')

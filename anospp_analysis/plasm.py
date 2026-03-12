@@ -94,9 +94,6 @@ def summarise_samples(sum_hap_df, comb_stats_df, targets=PLASM_TARGETS):
         .copy()
     )
 
-    # treat any contamination_confidence starting with "high" as high
-    is_high_conf = sum_hap_df['contamination_confidence'].str.startswith('high', na=False)
-
     for t in targets:
 
         t_df = (
@@ -160,7 +157,8 @@ def summarise_samples(sum_hap_df, comb_stats_df, targets=PLASM_TARGETS):
         'plasm_taxa':{},
         'plasm_labels':{},
         'plasm_status':{},
-        'plasm_group_pass':{}
+        'plasm_group_detected':{},
+        'plasm_species_detected':{}
     }
     for sample_id, sample_hap_df in sum_hap_df.groupby('sample_id'):
         sample_spp = sample_hap_df['species'].unique()
@@ -213,41 +211,39 @@ def summarise_samples(sum_hap_df, comb_stats_df, targets=PLASM_TARGETS):
             for tgt in PLASM_TARGETS:
                 if f'{tgt}-only' in tax_labels:
                     tax_status = 'not_detected'
-            if 'contam' in tax_labels:
-                tax_status = 'not_detected'
-            elif 'contam-possible' in tax_labels:
-                tax_status = 'not_detected'
-            elif 'locov' in tax_labels:
-                tax_status = 'locov_detected'
-            elif 'multiallelic' in tax_labels:
-                tax_status = 'problematic_detected'
-            elif 'hicov' in tax_labels:
-                tax_status = 'problematic_detected'
-            elif 'pass' in tax_labels:
-                tax_status = 'detected'
+                    break
             else:
-                raise ValueError(f'failed to parse status for {sample_id}, {tax}: {tax_labels}')
+                if 'contam' in tax_labels:
+                    tax_status = 'not_detected'
+                elif 'contam-possible' in tax_labels:
+                    tax_status = 'not_detected'
+                elif 'locov' in tax_labels:
+                    tax_status = 'locov_detected'
+                elif 'multiallelic' in tax_labels:
+                    tax_status = 'problematic_detected'
+                elif 'hicov' in tax_labels:
+                    tax_status = 'problematic_detected'
+                elif 'pass' in tax_labels:
+                    tax_status = 'detected'
+                else:
+                    raise ValueError(f'failed to parse status for {sample_id}, {tax}: {tax_labels}')
             # record statuses
             detection['plasm_taxa'][sample_id].append(tax)
             detection['plasm_labels'][sample_id].append('_'.join(tax_labels))
             detection['plasm_status'][sample_id].append(tax_status)
             if tax_status != 'not_detected':
-                detection['plasm_group_pass'][sample_id].append(tax_sample_hap_df['group'].iloc[0])
+                # only one group expected
+                detection['plasm_group_detected'][sample_id].append(tax_sample_hap_df['group'].iloc[0])
+                # multiple species per group possible - record pipe-separated
+                detection['plasm_species_detected'][sample_id].append('|'.join(tax_sample_hap_df['species'].unique()))
         
         for k in detection.keys():
             detection[k][sample_id] = ';'.join(detection[k][sample_id])
 
-    sum_samples_df['plasm_taxa'] = pd.Series(detection['plasm_taxa'])
-    sum_samples_df['plasm_taxa'] = sum_samples_df['plasm_taxa'].fillna('')
-
-    sum_samples_df['plasm_labels'] = pd.Series(detection['plasm_labels'])
-    sum_samples_df['plasm_labels'] = sum_samples_df['plasm_labels'].fillna('')
-
-    sum_samples_df['plasm_status'] = pd.Series(detection['plasm_status'])
-    sum_samples_df['plasm_status'] = sum_samples_df['plasm_status'].fillna('not_detected')
-
-    sum_samples_df['plasm_group_pass'] = pd.Series(detection['plasm_group_pass'])
-    sum_samples_df['plasm_group_pass'] = sum_samples_df['plasm_group_pass'].fillna('')
+    for annotation in detection.keys():
+        fill_value = ('not_detected' if annotation == 'plasm_status' else '')
+        sum_samples_df[annotation] = pd.Series(detection[annotation])
+        sum_samples_df[annotation] = sum_samples_df[annotation].fillna(fill_value)
 
     return sum_samples_df
 
@@ -287,9 +283,9 @@ def plot_plate_view(plasm_df, out_fn, reference_colours, lims_plate=True, title=
 
     # colour by taxon and detection status
     plasm_df['colour_group'] = 'not_detected'
-    plasm_df.loc[plasm_df['plasm_group_pass'].str.contains(';'), 'colour_group'] = 'mixed_infection'
+    plasm_df.loc[plasm_df['plasm_group_detected'].str.contains(';'), 'colour_group'] = 'mixed_infection'
     plasm_df.loc[plasm_df['plasm_taxa'] != '', 'colour_group'] = 'fail_detection'
-    plasm_df.loc[plasm_df['plasm_group_pass'] != '', 'colour_group'] = plasm_df['plasm_group_pass']
+    plasm_df.loc[plasm_df['plasm_group_detected'] != '', 'colour_group'] = plasm_df['plasm_group_detected']
 
     # colour for inferred statuses
     reference_colours['not_detected'] = '#ffffff'
@@ -346,7 +342,7 @@ def plot_plate_view(plasm_df, out_fn, reference_colours, lims_plate=True, title=
         ('Parasite taxa', '@plasm_taxa'),
         ('Parasite labels', '@plasm_labels'),
         ('Parasite statuses', '@plasm_status'),
-        ('Parasite groups detected', '@plasm_group_pass'),
+        ('Parasite groups detected', '@plasm_group_detected'),
         ('P1 total reads', '@P1_reads_total'),
         ('P1 QC pass reads', '@P1_reads_pass'),
         ('P1 QC pass haplotype IDs', '@P1_seqids_pass'),
@@ -383,10 +379,12 @@ def empty_haps():
     cols = [
         # from haps
         'sample_id','target','consensus','reads','total_reads','reads_fraction','nalleles','seqid',
+        # from pre-processing
+        'locov',
         # from sintax
         'strand',
         'domain','domain_bootstrap','phylum','phylum_bootstrap','order','order_bootstrap','family','family_bootstrap',
-        'genus','genus_bootstrap','subgenus','subgenus_bootstrap','group','group_bootstrap','species','species_bootstrap'
+        'genus','genus_bootstrap','subgenus','subgenus_bootstrap','group','group_bootstrap','species','species_bootstrap',
         ]
 
     return pd.DataFrame(columns=cols)
@@ -449,7 +447,7 @@ def plasm(args):
         )
         with open(tgt_sintax_log, 'w') as log:
             log.write(e)
-
+        logging.info(f'parsing SINTAX output {tgt_sintax_tsv}')
         sintax_df = parse_sintax(tgt_sintax_tsv, sintax_ranks)
         sintax_df['target'] = tgt
         sintax_dfs.append(sintax_df)
@@ -457,7 +455,8 @@ def plasm(args):
     sintax_df = pd.concat(sintax_dfs)
 
     annotated_hap_fn = f'{args.outdir}/plasm_hap_summary.tsv'
-    plasm_assignment_fn = f'{args.outdir}/plasm_assignment.tsv'
+    # annotated_sample_fn = f'{args.outdir}/plasm_sample_summary.tsv'
+    plasm_assignment_fn = f'{args.outdir}/plasm_assignment.tsv' 
     if sintax_df.shape[0] > 0:
         annotated_hap_df = pd.merge(plasm_hap_df, sintax_df, on=['seqid','target'])
         logging.info(f'writing annotated haplotypes to {annotated_hap_fn}')
@@ -509,14 +508,73 @@ def plasm(args):
     annotated_sample_df['plasm_ref'] = reference_version
     annotated_sample_df.reset_index(inplace=True)
     annotated_sample_df.columns = annotated_sample_df.columns.str.lower()
+    # logging.info(f'writing all sample level info to {annotated_sample_fn}')
+    # annotated_sample_df.to_csv(annotated_sample_fn, sep='\t', index=False)
     logging.info(f'writing sample level plasm assignment to {plasm_assignment_fn}')
-    annotated_sample_df.drop(columns=[
-        'sample_name',
-        'lims_plate_id',
-        'lims_well_id',
-        'plate_id',
-        'well_id'
-    ]).to_csv(plasm_assignment_fn, sep='\t', index=False)
+    # explicitly listing all cols rather than dropping plate/well/sample info used for plotting
+    annotated_sample_df[[
+        'sample_id',
+        'p1_reads_pass',
+        'p1_seqids_pass',
+        'p1_seqids_pass_reads',
+        'p1_genus_pass',
+        'p1_genus_bootstrap_pass',
+        'p1_group_pass',
+        'p1_group_bootstrap_pass',
+        'p1_species_pass',
+        'p1_species_bootstrap_pass',
+        'p1_reads_contam',
+        'p1_seqids_contam',
+        'p1_seqids_contam_reads',
+        'p1_genus_contam',
+        'p1_genus_bootstrap_contam',
+        'p1_group_contam',
+        'p1_group_bootstrap_contam',
+        'p1_species_contam',
+        'p1_species_bootstrap_contam',
+        'p1_reads_locov',
+        'p1_seqids_locov',
+        'p1_seqids_locov_reads',
+        'p1_genus_locov',
+        'p1_genus_bootstrap_locov',
+        'p1_group_locov',
+        'p1_group_bootstrap_locov',
+        'p1_species_locov',
+        'p1_species_bootstrap_locov',
+        'p2_reads_pass',
+        'p2_seqids_pass',
+        'p2_seqids_pass_reads',
+        'p2_genus_pass',
+        'p2_genus_bootstrap_pass',
+        'p2_group_pass',
+        'p2_group_bootstrap_pass',
+        'p2_species_pass',
+        'p2_species_bootstrap_pass',
+        'p2_reads_contam',
+        'p2_seqids_contam',
+        'p2_seqids_contam_reads',
+        'p2_genus_contam',
+        'p2_genus_bootstrap_contam',
+        'p2_group_contam',
+        'p2_group_bootstrap_contam',
+        'p2_species_contam',
+        'p2_species_bootstrap_contam',
+        'p2_reads_locov',
+        'p2_seqids_locov',
+        'p2_seqids_locov_reads',
+        'p2_genus_locov',
+        'p2_genus_bootstrap_locov',
+        'p2_group_locov',
+        'p2_group_bootstrap_locov',
+        'p2_species_locov',
+        'p2_species_bootstrap_locov',
+        'plasm_taxa',
+        'plasm_labels',
+        'plasm_status',
+        'plasm_group_detected',
+        'plasm_species_detected',
+        'plasm_ref'
+    ]].to_csv(plasm_assignment_fn, sep='\t', index=False)
 
     logging.info('ANOSPP plasm complete')
 
@@ -526,7 +584,7 @@ def main():
     parser = argparse.ArgumentParser("Plasmodium species assignment for ANOSPP data")
     parser.add_argument('-a', '--haplotypes', help='Haplotypes tsv file generated by prep', required=True)
     parser.add_argument('-s', '--stats', help='Comb stats tsv file generated by prep', required=True)
-    parser.add_argument('-o', '--outdir', help='Output directory. Default: plasm', default='plasm')
+    parser.add_argument('-o', '--outdir', help='Output directory. Default: plasmv2', default='plasmv2')
     parser.add_argument('-r', '--reference_path', 
                         help='Path to plasm reference directory containing SiNTAX reference fasta for each amplicon and colour scheme', 
                         required=True)

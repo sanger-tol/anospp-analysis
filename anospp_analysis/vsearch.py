@@ -124,6 +124,15 @@ def parse_sintax(sintax_tsv, ranks):
     ] 
     for r in ranks.values():
         out_cols.extend([r, r + '_bootstrap'])
+        # fill values for sequences and ranks lacking identification info
+        if r not in df.columns:
+            # eg subgenus missing
+            df[r] = 'unknown'
+            df[r + '_bootstrap'] = 0
+        else:
+            # eg unknown sequence or missing level info
+            df[r] = df[r].fillna('unknown')
+            df[r + '_bootstrap'] = df[r + '_bootstrap'].fillna(0)
     
     for col in out_cols:
         if col not in df.columns:

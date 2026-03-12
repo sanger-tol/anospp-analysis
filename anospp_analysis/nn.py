@@ -486,8 +486,10 @@ def estimate_fine_ratio(comb_stats_df, results_dfs, level_hierarchy):
             second_hit = p_sorted.index[i]
             if second_hit in top_hit_group_members:
                 second_hit_prop = p_sorted[second_hit]
-                ratio = top_hit_prop / second_hit_prop
-                break
+                # do not record ratio for zero frequency second hit
+                if second_hit_prop > 0:
+                    ratio = top_hit_prop / second_hit_prop
+                    break
         else:
             logging.warning(f'no concordant second hit found for {top_hit} ({top_hit_prop}) in {sample_id}, skipping ratio')
             continue
@@ -812,11 +814,15 @@ def nn(args):
 
         comb_stats_df['nn_ref'] = version_name
 
-    comb_stats_df = estimate_fine_ratio(
-            comb_stats_df,
-            results_dfs,
-            level_hierarchy
-        )
+    # temp logic to add fine_ratio to backlog resuls without recomputing hard calls
+    if 'fine_ratio' not in comb_stats_df.columns:
+        comb_stats_df = estimate_fine_ratio(
+                comb_stats_df,
+                results_dfs,
+                level_hierarchy
+            )
+    else:
+        logging.warning('skipping fine ratio estimation')
     logging.info(f'writing assignment results to {nn_assignment_fn}')
     comb_stats_df[[
         'sample_id',
