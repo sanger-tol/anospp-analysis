@@ -482,6 +482,7 @@ def estimate_fine_ratio(comb_stats_df, results_dfs, level_hierarchy):
         if len(top_hit_group_members) == 1:
             logging.warning(f'no other fine level labels in int or coarse for {top_hit}, skipping ratio')
             continue
+        second_conflict = False
         for i in range(1, len(p_sorted)):
             second_hit = p_sorted.index[i]
             if second_hit in top_hit_group_members:
@@ -490,13 +491,17 @@ def estimate_fine_ratio(comb_stats_df, results_dfs, level_hierarchy):
                 if second_hit_prop > 0:
                     ratio = top_hit_prop / second_hit_prop
                     break
+            # record conflict for mismatches
+            else:
+                second_conflict = True
         else:
             logging.warning(f'no concordant second hit found for {top_hit} ({top_hit_prop}) in {sample_id}, skipping ratio')
             continue
         ratios[sample_id] = {
             'fine_top_hit': top_hit,
             'fine_second_hit': second_hit,
-            'fine_ratio': ratio
+            'fine_ratio': ratio,
+            'fine_second_conflict': second_conflict
         }
     ratios_df = pd.DataFrame.from_dict(ratios, orient='index')
     ratios_df['fine_ratio'] = ratios_df['fine_ratio'].round(3)
@@ -833,6 +838,7 @@ def nn(args):
         'fine_top_hit',
         'fine_second_hit',
         'fine_ratio',
+        'fine_second_conflict',
         'nn_assignment',
         'nn_coarse',
         'nn_int',
