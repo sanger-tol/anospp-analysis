@@ -209,6 +209,8 @@ def summarise_samples(sum_hap_df, comb_stats_df, targets=PLASM_TARGETS):
                     tax_status = 'not_detected'
                 elif 'contam-possible' in tax_labels:
                     tax_status = 'not_detected'
+                elif 'mixed-spp' in tax_labels:
+                    tax_status = 'detected'
                 elif 'locov' in tax_labels:
                     tax_status = 'detected'
                 elif 'multiallelic' in tax_labels:
