@@ -109,45 +109,32 @@ def summarise_samples(sum_hap_df, comb_stats_df, targets=PLASM_TARGETS):
             .astype(int)
         )
 
-        for category in ['pass', 'contam', 'locov']:
+        # fill ha[p catagories - from lowest to highest priority
+        t_df['category'] = 'pass'
+        t_df.loc[t_df['locov'], 'category'] = 'locov'
+        t_df.loc[
+            t_df['contamination_status'] == 'affected',
+            'category'
+            ] = 'contam'
 
-            # NB categories should be mutually exclusive
-            if category == 'pass':
-                category_mask = (
-                    ~t_df['locov'] &
-                    (t_df['contamination_status'] != 'affected')
-                )
-            elif category == 'contam':
-                category_mask = (
-                    (t_df['contamination_status'] == 'affected')
-                )
-            elif category == 'locov':
-                category_mask = (
-                    t_df['locov'] &
-                    (t_df['contamination_status'] != 'affected')
-                )
-
-            category_df = t_df[category_mask] 
-            category_gb = category_df.groupby('sample_id')
-            sum_samples_df[f'{t}_reads_{category}'] = (
-                category_gb['reads'].sum()
-                .reindex(sum_samples_df.index)
-                .fillna(0)
-                .astype(int)
-            )
-            category_gb = category_df.astype(str).groupby('sample_id')
-            for col, outcol in [
-                ('seqid', f'{t}_seqids_{category}'),
-                ('reads', f'{t}_seqids_{category}_reads'),
-                ('genus', f'{t}_genus_{category}'),
-                ('genus_bootstrap', f'{t}_genus_bootstrap_{category}'),
-                ('group', f'{t}_group_{category}'),
-                ('group_bootstrap', f'{t}_group_bootstrap_{category}'),
-                ('species', f'{t}_species_{category}'),
-                ('species_bootstrap', f'{t}_species_bootstrap_{category}'),
+        for col, outcol in [
+                ('seqid', f'{t}_seqids'),
+                ('reads', f'{t}_seqids_reads'),
+                ('category', f'{t}_seqids_categories'),
+                ('genus', f'{t}_seqids_genus'),
+                ('genus_bootstrap', f'{t}_seqids_genus_bootstrap'),
+                ('group', f'{t}_seqids_group'),
+                ('group_bootstrap', f'{t}_seqids_group_bootstrap'),
+                ('species', f'{t}_seqids_species'),
+                ('species_bootstrap', f'{t}_seqids_species_bootstrap'),
             ]:
+                agg_df = t_df[['sample_id',col]].copy()
+                if pd.api.types.is_numeric_dtype(agg_df[col]):
+                    agg_df[col] = agg_df[col].fillna(0).astype(str)
+                else:
+                    agg_df[col] = agg_df[col].fillna('')
                 sum_samples_df[outcol] = (
-                    category_gb[col]
+                    agg_df.groupby('sample_id')[col]
                     .agg(';'.join)
                     .reindex(sum_samples_df.index)
                     .fillna('')
@@ -156,7 +143,7 @@ def summarise_samples(sum_hap_df, comb_stats_df, targets=PLASM_TARGETS):
     detection = {
         'plasm_taxa':{},
         'plasm_labels':{},
-        'plasm_status':{},
+        'plasm_detection':{},
         'plasm_group_detected':{},
         'plasm_species_detected':{}
     }
@@ -169,16 +156,21 @@ def summarise_samples(sum_hap_df, comb_stats_df, targets=PLASM_TARGETS):
             tax_col = 'group'
         else:
             tax_col = 'species'
-
         
         for k in detection.keys():
             detection[k][sample_id] = []
+        # detection status recorded once for sample - default at not detected
+        detection['plasm_detection'][sample_id] = ['not_detected']
         for tax, tax_sample_hap_df in sample_hap_df.groupby(tax_col):
             tax_labels = []
+            # mixed species
+            if tax_col == 'group':
+                tax_labels += ['mixed-spp']
             tax_targets = tax_sample_hap_df['target'].unique()
             # single target
             if len(tax_targets) == 1:
                 tax_labels += [f'{tax_targets[0]}-only']
+            # masks for other labels
             is_contam = (tax_sample_hap_df['contamination_status'] == 'affected') & \
                 tax_sample_hap_df['contamination_confidence'].str.startswith('high')
             possible_contam = (tax_sample_hap_df['contamination_status'] == 'affected')
@@ -218,11 +210,11 @@ def summarise_samples(sum_hap_df, comb_stats_df, targets=PLASM_TARGETS):
                 elif 'contam-possible' in tax_labels:
                     tax_status = 'not_detected'
                 elif 'locov' in tax_labels:
-                    tax_status = 'locov_detected'
+                    tax_status = 'detected'
                 elif 'multiallelic' in tax_labels:
-                    tax_status = 'problematic_detected'
+                    tax_status = 'detected'
                 elif 'hicov' in tax_labels:
-                    tax_status = 'problematic_detected'
+                    tax_status = 'detected'
                 elif 'pass' in tax_labels:
                     tax_status = 'detected'
                 else:
@@ -230,18 +222,20 @@ def summarise_samples(sum_hap_df, comb_stats_df, targets=PLASM_TARGETS):
             # record statuses
             detection['plasm_taxa'][sample_id].append(tax)
             detection['plasm_labels'][sample_id].append('_'.join(tax_labels))
-            detection['plasm_status'][sample_id].append(tax_status)
             if tax_status != 'not_detected':
-                # only one group expected
+                # update detection status
+                detection['plasm_detection'][sample_id] = ['detected']
+                # only one group possible
                 detection['plasm_group_detected'][sample_id].append(tax_sample_hap_df['group'].iloc[0])
-                # multiple species per group possible - record pipe-separated
-                detection['plasm_species_detected'][sample_id].append('|'.join(tax_sample_hap_df['species'].unique()))
+                # multiple species per group possible - record top botstrap
+                top_sp = tax_sample_hap_df.sort_values('species_bootstrap', ascending=False)['species'].iloc[0]
+                detection['plasm_species_detected'][sample_id].append(top_sp)
         
         for k in detection.keys():
             detection[k][sample_id] = ';'.join(detection[k][sample_id])
 
     for annotation in detection.keys():
-        fill_value = ('not_detected' if annotation == 'plasm_status' else '')
+        fill_value = ('not_detected' if annotation == 'plasm_detection' else '')
         sum_samples_df[annotation] = pd.Series(detection[annotation])
         sum_samples_df[annotation] = sum_samples_df[annotation].fillna(fill_value)
 
@@ -277,8 +271,8 @@ def plot_plate_view(plasm_df, out_fn, reference_colours, lims_plate=True, title=
         plasm_df['row'] = plasm_df['well_id'].str[1:]
 
     # display values
-    plasm_df['P1_seqids_disp'] = plasm_df['P1_seqids_pass'].str.replace(';.*', '...', regex=True)
-    plasm_df['P2_seqids_disp'] = plasm_df['P2_seqids_pass'].str.replace(';.*', '...', regex=True)
+    plasm_df['P1_seqids_disp'] = plasm_df['P1_seqids'].str.replace(';.*', '...', regex=True)
+    plasm_df['P2_seqids_disp'] = plasm_df['P2_seqids'].str.replace(';.*', '...', regex=True)
     plasm_df['comb_seqids_disp'] = plasm_df['P1_seqids_disp'] + '\n' + plasm_df['P2_seqids_disp']
 
     # colour by taxon and detection status
@@ -339,28 +333,24 @@ def plot_plate_view(plasm_df, out_fn, reference_colours, lims_plate=True, title=
     #set up the hover value
     p.add_tools(HoverTool(tooltips=[
         ('sample id', '@{sample_id}'),
+        ('Parasite detection', '@plasm_detection'),
+        ('Parasite groups detected', '@plasm_group_detected'),
+        ('Parasite species detected', '@plasm_species_detected'),
         ('Parasite taxa', '@plasm_taxa'),
         ('Parasite labels', '@plasm_labels'),
-        ('Parasite statuses', '@plasm_status'),
-        ('Parasite groups detected', '@plasm_group_detected'),
         ('P1 total reads', '@P1_reads_total'),
-        ('P1 QC pass reads', '@P1_reads_pass'),
-        ('P1 QC pass haplotype IDs', '@P1_seqids_pass'),
-        ('P1 reads per QC pass haplotype', '@P1_seqids_pass_reads'),
-        ('P1 species assignments for pass haplotypes', '@P1_species_pass'),
-        ('P1 contamination haplotype IDs', '@P1_seqids_contam'),
-        ('P1 reads per contamination haplotype', '@P1_seqids_contam_reads'),
-        ('P1 low coverage haplotype IDs', '@P1_seqids_locov'),
-        ('P1 reads per low coverage haplotype', '@P1_seqids_locov_reads'),
+        ('P1 haplotype IDs', '@P1_seqids'),
+        ('P1 reads per haplotype', '@P1_seqids_reads'),
+        ('P1 categories per haplotype', '@P1_seqids_categories'),
+        ('P1 species per haplotype', '@P1_seqids_species'),
+        ('P1 species bootstrap per haplotype', '@P1_seqids_species_bootstrap'),
         ('P2 total reads', '@P2_reads_total'),
-        ('P2 QC pass reads', '@P2_reads_pass'),
-        ('P2 QC pass haplotype IDs', '@P2_seqids_pass'),
-        ('P2 reads per QC pass haplotype', '@P2_seqids_pass_reads'),
-        ('P2 species assignments for pass haplotypes', '@P2_species_pass'),
-        ('P2 contamination haplotype IDs', '@P2_seqids_contam'),
-        ('P2 reads per contamination haplotype', '@P2_seqids_contam_reads'),
-        ('P2 low coverage haplotype IDs', '@P2_seqids_locov'),
-        ('P2 reads per low coverage haplotype', '@P2_seqids_locov_reads'),
+        ('P2 haplotype IDs', '@P2_seqids'),
+        ('P2 reads per haplotype', '@P2_seqids_reads'),
+        ('P2 categories per haplotype', '@P2_seqids_categories'),
+        ('P2 species per haplotype', '@P2_seqids_species'),
+        ('P2 species bootstrap per haplotype', '@P2_seqids_species_bootstrap'),
+        
     ]))
 
     #set up the rest of the figure and save the plot
@@ -416,14 +406,6 @@ def plasm(args):
 
     plasm_hap_df = hap_df[hap_df['target'].isin(PLASM_TARGETS)].copy()
 
-    # mark locov 
-    plasm_hap_df['locov'] = False
-    for tgt, mincov in zip(PLASM_TARGETS, (args.filter_p1, args.filter_p2)):
-        plasm_hap_df.loc[
-            (plasm_hap_df['target'] == tgt) & (plasm_hap_df['reads'] < mincov),
-            'locov'
-        ] = True
-
     sintax_dfs = []
     for tgt in PLASM_TARGETS:
         tgt_plasm_hap_df = plasm_hap_df.query('target == @tgt')
@@ -464,6 +446,14 @@ def plasm(args):
         logging.warning('no Plasmodium haplotypes to annotate, creating empty haplotypes file')
         annotated_hap_df = empty_haps()
 
+    # mark locov 
+    annotated_hap_df['locov'] = False
+    for tgt, mincov in zip(PLASM_TARGETS, (args.filter_p1, args.filter_p2)):
+        annotated_hap_df.loc[
+            (annotated_hap_df['target'] == tgt) & (annotated_hap_df['reads'] < mincov),
+            'locov'
+        ] = True
+
     if args.estimate_contamination:
         logging.info('estimating cross-contamination')
         annotated_hap_df = estimate_contamination(
@@ -486,7 +476,7 @@ def plasm(args):
         comb_stats_df,
         targets=PLASM_TARGETS,
     )
-
+    
     if args.interactive_plotting:
 
         for plate in annotated_sample_df.plate_id.unique():
@@ -514,67 +504,35 @@ def plasm(args):
     # explicitly listing all cols rather than dropping plate/well/sample info used for plotting
     annotated_sample_df[[
         'sample_id',
-        'p1_reads_pass',
-        'p1_seqids_pass',
-        'p1_seqids_pass_reads',
-        'p1_genus_pass',
-        'p1_genus_bootstrap_pass',
-        'p1_group_pass',
-        'p1_group_bootstrap_pass',
-        'p1_species_pass',
-        'p1_species_bootstrap_pass',
-        'p1_reads_contam',
-        'p1_seqids_contam',
-        'p1_seqids_contam_reads',
-        'p1_genus_contam',
-        'p1_genus_bootstrap_contam',
-        'p1_group_contam',
-        'p1_group_bootstrap_contam',
-        'p1_species_contam',
-        'p1_species_bootstrap_contam',
-        'p1_reads_locov',
-        'p1_seqids_locov',
-        'p1_seqids_locov_reads',
-        'p1_genus_locov',
-        'p1_genus_bootstrap_locov',
-        'p1_group_locov',
-        'p1_group_bootstrap_locov',
-        'p1_species_locov',
-        'p1_species_bootstrap_locov',
-        'p2_reads_pass',
-        'p2_seqids_pass',
-        'p2_seqids_pass_reads',
-        'p2_genus_pass',
-        'p2_genus_bootstrap_pass',
-        'p2_group_pass',
-        'p2_group_bootstrap_pass',
-        'p2_species_pass',
-        'p2_species_bootstrap_pass',
-        'p2_reads_contam',
-        'p2_seqids_contam',
-        'p2_seqids_contam_reads',
-        'p2_genus_contam',
-        'p2_genus_bootstrap_contam',
-        'p2_group_contam',
-        'p2_group_bootstrap_contam',
-        'p2_species_contam',
-        'p2_species_bootstrap_contam',
-        'p2_reads_locov',
-        'p2_seqids_locov',
-        'p2_seqids_locov_reads',
-        'p2_genus_locov',
-        'p2_genus_bootstrap_locov',
-        'p2_group_locov',
-        'p2_group_bootstrap_locov',
-        'p2_species_locov',
-        'p2_species_bootstrap_locov',
+        # 'p1_reads_total',
+        'p1_seqids',
+        'p1_seqids_reads',
+        'p1_seqids_categories',
+        'p1_seqids_genus',
+        'p1_seqids_genus_bootstrap',
+        'p1_seqids_group',
+        'p1_seqids_group_bootstrap',
+        'p1_seqids_species',
+        'p1_seqids_species_bootstrap',
+        # 'p2_reads_total',
+        'p2_seqids',
+        'p2_seqids_reads',
+        'p2_seqids_categories',
+        'p2_seqids_genus',
+        'p2_seqids_genus_bootstrap',
+        'p2_seqids_group',
+        'p2_seqids_group_bootstrap',
+        'p2_seqids_species',
+        'p2_seqids_species_bootstrap',
         'plasm_taxa',
         'plasm_labels',
-        'plasm_status',
+        'plasm_detection',
         'plasm_group_detected',
         'plasm_species_detected',
         'plasm_ref'
     ]].to_csv(plasm_assignment_fn, sep='\t', index=False)
+
+    annotated_sample_df.to_csv(plasm_assignment_fn, sep='\t', index=False)
 
     logging.info('ANOSPP plasm complete')
 
