@@ -36,7 +36,7 @@ def estimate_contamination(
     assert ~ext_hap_df['plate_id'].isna().any(), 'failed to get plate IDs'
 
     ext_hap_df['contamination_status'] = ''
-    ext_hap_df['contamination_confidence'] = ''
+    # ext_hap_df['contamination_confidence'] = ''
 
     for seqid, seqid_df in ext_hap_df.groupby('seqid'):
         # any potential source for seqid
@@ -57,19 +57,18 @@ def estimate_contamination(
                 # unclear - between max_reads_affected and min_reads_source
                 ext_hap_df.loc[(ext_hap_df.seqid == seqid), 'contamination_status'] = 'unclear'
                 ext_hap_df.loc[is_src_seqid, 'contamination_status'] = 'source'
-                ext_hap_df.loc[is_tgt_seqid, 'contamination_status'] = 'affected'
                 # confidence - low without plate/well match
-                ext_hap_df.loc[is_tgt_seqid, 'contamination_confidence'] = 'low'
+                ext_hap_df.loc[is_tgt_seqid, 'contamination_status'] = 'affected_possible'
                 for _, src_row in src_df.iterrows():
                     # affected samples sharing plate or well with source
                     same_plate_tgt_samples = tgt_df.loc[tgt_df.plate_id == src_row.plate_id, 'sample_id']
                     if same_plate_tgt_samples.shape[0] > 0:
                         hc_tgt_haps = (ext_hap_df.sample_id.isin(same_plate_tgt_samples) & (ext_hap_df.seqid == seqid))
-                        ext_hap_df.loc[hc_tgt_haps, 'contamination_confidence'] = 'high_plate_sharing'
+                        ext_hap_df.loc[hc_tgt_haps, 'contamination_status'] = 'affected_plate_sharing'
                     same_well_tgt_samples = tgt_df.loc[tgt_df.well_id == src_row.well_id, 'sample_id']
                     if same_well_tgt_samples.shape[0] > 0:
                         hc_tgt_haps = (ext_hap_df.sample_id.isin(same_well_tgt_samples) & (ext_hap_df.seqid == seqid))
-                        ext_hap_df.loc[hc_tgt_haps, 'contamination_confidence'] = 'high_well_sharing'
+                        ext_hap_df.loc[hc_tgt_haps, 'contamination_status'] = 'affected_well_sharing'
     
 
     out_hap_df = ext_hap_df.drop(columns=['plate_id','well_id'])
@@ -101,13 +100,21 @@ def summarise_samples(sum_hap_df, comb_stats_df, targets=PLASM_TARGETS):
             .sort_values('reads', ascending=False)
         )
 
-        # fill ha[p catagories - from lowest to highest priority
+        # fill hap catagories - from lowest to highest priority
         t_df['category'] = 'pass'
         t_df.loc[t_df['locov'], 'category'] = 'locov'
         t_df.loc[
-            t_df['contamination_status'] == 'affected',
+            (t_df['contamination_status'] == 'affected_possible'),
             'category'
-            ] = 'contam'
+            ] = 'contam_possible'
+        t_df.loc[
+            (t_df['contamination_status'] == 'affected_well_sharing'),
+            'category'
+            ] = 'contam_well'
+        t_df.loc[
+            (t_df['contamination_status'] == 'affected_plate_sharing'),
+            'category'
+            ] = 'contam_plate'
 
         for col, outcol in [
                 ('seqid', f'{t}_seqids'),
@@ -167,22 +174,23 @@ def summarise_samples(sum_hap_df, comb_stats_df, targets=PLASM_TARGETS):
             # single target
             if len(tax_targets) == 1:
                 tax_labels += [f'{tax_targets[0]}-only']
-            # masks for other labels
-            is_contam = (tax_sample_hap_df['contamination_status'] == 'affected') & \
-                tax_sample_hap_df['contamination_confidence'].str.startswith('high')
-            possible_contam = (tax_sample_hap_df['contamination_status'] == 'affected')
+            # masks for other labels - not from categories as these can overlap
+            is_contam = tax_sample_hap_df['contamination_status'].isin((
+                'affected_well_sharing',
+                'affected_plate_sharing'
+            ))
+            # at least low confidence contamination
+            possible_contam = tax_sample_hap_df['contamination_status'].str.startswith('affected')
             is_locov = tax_sample_hap_df['locov']
             is_multiallelic = (tax_sample_hap_df['target'].value_counts() > 1)
             is_hicov = (tax_sample_hap_df['contamination_status'] == 'source')
-            # all haplotypes are contamination 
-            # any unique haplotypes indicative of real infection
+            # all haplotypes are contamination - any unique haplotypes indicative of real infection
             if is_contam.all():
                 tax_labels += ['contam']
             # all haplotypes at least low confidence contamination
             elif possible_contam.all():
                 tax_labels += ['contam-possible']
-            # all haplotypes low coverage
-            # any higher coverage haplotypes indicative of real infection
+            # all haplotypes low coverage - any higher coverage haplotypes indicative of real infection
             if is_locov.all():
                 tax_labels += ['locov']
             # any multiallelics - mixed infection or high coverage
@@ -195,7 +203,7 @@ def summarise_samples(sum_hap_df, comb_stats_df, targets=PLASM_TARGETS):
             if len(tax_labels) == 0:
                 tax_labels += ['pass']
 
-            # aggregate labels into status
+            # aggregate labels into status - from high to low priority
             tax_status = 'undefined'
             for tgt in PLASM_TARGETS:
                 if f'{tgt}-only' in tax_labels:
