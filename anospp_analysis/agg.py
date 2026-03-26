@@ -19,8 +19,6 @@ def validate_aggregation(comb_df):
         'dada2_nonchim_reads', 'target_reads', 'overall_filter_rate',
         'unassigned_asvs', 'targets_recovered', 'raw_mosq_targets_recovered',
         'raw_multiallelic_mosq_targets', 'raw_mosq_reads', 'p1_reads', 'p2_reads', 
-        # 'p1_reads_pass', 'p2_reads_pass', 'p1_reads_contam', 'p2_reads_contam', 'p1_reads_locov', 'p2_reads_locov',
-        # 'p1_reads_total', 'p2_reads_total', 
         'plasm_detection', 'plasm_ref',
         # skip plasm hap
         'multiallelic_mosq_targets', 'mosq_reads', 'mosq_targets_recovered',
@@ -115,6 +113,7 @@ def agg(args):
     run_id, comb_stats_df = load_comb_stats(args.stats)
     plasm_df = pd.read_csv(args.plasm, sep='\t')
     nn_df = pd.read_csv(args.nn, sep='\t')
+    af_df = pd.read_csv(args.assignment_fine, sep='\t')
     vae_df = pd.read_csv(args.vae, sep='\t')
 
     logging.info("merging results tables")
@@ -143,6 +142,15 @@ def agg(args):
         'nnovae_call_method'
     ] = 'VAE'
 
+    logging.info('adding NN fine assignment proportions')
+    arr = af_df.columns.to_list()
+    arr[0] = 'sample_id'
+    af_df.columns = arr
+    assert af_df.sample_id.isin(comb_df.sample_id).all(), \
+        'some NN fine assignment samples do not match NN, plasm, comb stats'
+    comb_df = pd.merge(comb_df, af_df, how='left')
+
+
     if not args.force:
         validate_aggregation(comb_df)
 
@@ -157,8 +165,11 @@ def main():
                         help='path to comb stats tsv. Default: prep/comb_stats.tsv',
                         default='prep/comb_stats.tsv')
     parser.add_argument('-n', '--nn', 
-                        help='path to NN assignment tsv. Default: nn/nn_assignment.tsv', 
+                        help='path to NN sample assignment tsv. Default: nn/nn_assignment.tsv', 
                         default='nn/nn_assignment.tsv')
+    parser.add_argument('-a', '--assignment_fine', 
+                        help='path to NN fine assignment proportions tsv. Default: nn/assignment_fine.tsv', 
+                        default='nn/assignment_fine.tsv')                    
     parser.add_argument('-e', '--vae', 
                         help='path to VAE assignment tsv. Default: vae/vae_assignment.tsv',
                         default='vae/vae_assignment.tsv')
