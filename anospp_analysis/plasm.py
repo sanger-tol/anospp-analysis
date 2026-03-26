@@ -101,14 +101,6 @@ def summarise_samples(sum_hap_df, comb_stats_df, targets=PLASM_TARGETS):
             .sort_values('reads', ascending=False)
         )
 
-        # total reads
-        total_reads = t_df.groupby('sample_id')['reads'].sum()
-        sum_samples_df[f'{t}_reads_total'] = (
-            total_reads.reindex(sum_samples_df.index)
-            .fillna(0)
-            .astype(int)
-        )
-
         # fill ha[p catagories - from lowest to highest priority
         t_df['category'] = 'pass'
         t_df.loc[t_df['locov'], 'category'] = 'locov'
@@ -121,8 +113,8 @@ def summarise_samples(sum_hap_df, comb_stats_df, targets=PLASM_TARGETS):
                 ('seqid', f'{t}_seqids'),
                 ('reads', f'{t}_seqids_reads'),
                 ('category', f'{t}_seqids_categories'),
-                ('genus', f'{t}_seqids_genus'),
-                ('genus_bootstrap', f'{t}_seqids_genus_bootstrap'),
+                # ('genus', f'{t}_seqids_genus'),
+                # ('genus_bootstrap', f'{t}_seqids_genus_bootstrap'),
                 ('group', f'{t}_seqids_group'),
                 ('group_bootstrap', f'{t}_seqids_group_bootstrap'),
                 ('species', f'{t}_seqids_species'),
@@ -144,10 +136,14 @@ def summarise_samples(sum_hap_df, comb_stats_df, targets=PLASM_TARGETS):
         'plasm_taxa':{},
         'plasm_labels':{},
         'plasm_detection':{},
-        'plasm_group_detected':{},
+        'plasm_groups_detected':{},
         'plasm_species_detected':{}
     }
     for sample_id, sample_hap_df in sum_hap_df.groupby('sample_id'):
+
+        # higher coverage taxa to be reported first
+        sample_hap_df = sample_hap_df.sort_values(by='reads', ascending=False)
+
         sample_spp = sample_hap_df['species'].unique()
         sample_grp = sample_hap_df['group'].unique()
 
@@ -161,6 +157,7 @@ def summarise_samples(sum_hap_df, comb_stats_df, targets=PLASM_TARGETS):
             detection[k][sample_id] = []
         # detection status recorded once for sample - default at not detected
         detection['plasm_detection'][sample_id] = ['not_detected']
+
         for tax, tax_sample_hap_df in sample_hap_df.groupby(tax_col):
             tax_labels = []
             # mixed species
@@ -209,9 +206,9 @@ def summarise_samples(sum_hap_df, comb_stats_df, targets=PLASM_TARGETS):
                     tax_status = 'not_detected'
                 elif 'contam-possible' in tax_labels:
                     tax_status = 'not_detected'
-                elif 'mixed-spp' in tax_labels:
-                    tax_status = 'detected'
                 elif 'locov' in tax_labels:
+                    tax_status = 'not_detected'
+                elif 'mixed-spp' in tax_labels:
                     tax_status = 'detected'
                 elif 'multiallelic' in tax_labels:
                     tax_status = 'detected'
@@ -228,7 +225,7 @@ def summarise_samples(sum_hap_df, comb_stats_df, targets=PLASM_TARGETS):
                 # update detection status
                 detection['plasm_detection'][sample_id] = ['detected']
                 # only one group possible
-                detection['plasm_group_detected'][sample_id].append(tax_sample_hap_df['group'].iloc[0])
+                detection['plasm_groups_detected'][sample_id].append(tax_sample_hap_df['group'].iloc[0])
                 # multiple species per group possible - record top botstrap
                 top_sp = tax_sample_hap_df.sort_values('species_bootstrap', ascending=False)['species'].iloc[0]
                 detection['plasm_species_detected'][sample_id].append(top_sp)
@@ -279,9 +276,9 @@ def plot_plate_view(plasm_df, out_fn, reference_colours, lims_plate=True, title=
 
     # colour by taxon and detection status
     plasm_df['colour_group'] = 'not_detected'
-    plasm_df.loc[plasm_df['plasm_group_detected'].str.contains(';'), 'colour_group'] = 'mixed_infection'
+    plasm_df.loc[plasm_df['plasm_groups_detected'].str.contains(';'), 'colour_group'] = 'mixed_infection'
     plasm_df.loc[plasm_df['plasm_taxa'] != '', 'colour_group'] = 'fail_detection'
-    plasm_df.loc[plasm_df['plasm_group_detected'] != '', 'colour_group'] = plasm_df['plasm_group_detected']
+    plasm_df.loc[plasm_df['plasm_groups_detected'] != '', 'colour_group'] = plasm_df['plasm_groups_detected']
 
     # colour for inferred statuses
     reference_colours['not_detected'] = '#ffffff'
@@ -336,17 +333,15 @@ def plot_plate_view(plasm_df, out_fn, reference_colours, lims_plate=True, title=
     p.add_tools(HoverTool(tooltips=[
         ('sample id', '@{sample_id}'),
         ('Parasite detection', '@plasm_detection'),
-        ('Parasite groups detected', '@plasm_group_detected'),
+        ('Parasite groups detected', '@plasm_groups_detected'),
         ('Parasite species detected', '@plasm_species_detected'),
         ('Parasite taxa', '@plasm_taxa'),
         ('Parasite labels', '@plasm_labels'),
-        ('P1 total reads', '@P1_reads_total'),
         ('P1 haplotype IDs', '@P1_seqids'),
         ('P1 reads per haplotype', '@P1_seqids_reads'),
         ('P1 categories per haplotype', '@P1_seqids_categories'),
         ('P1 species per haplotype', '@P1_seqids_species'),
         ('P1 species bootstrap per haplotype', '@P1_seqids_species_bootstrap'),
-        ('P2 total reads', '@P2_reads_total'),
         ('P2 haplotype IDs', '@P2_seqids'),
         ('P2 reads per haplotype', '@P2_seqids_reads'),
         ('P2 categories per haplotype', '@P2_seqids_categories'),
@@ -506,22 +501,20 @@ def plasm(args):
     # explicitly listing all cols rather than dropping plate/well/sample info used for plotting
     annotated_sample_df[[
         'sample_id',
-        # 'p1_reads_total',
         'p1_seqids',
         'p1_seqids_reads',
         'p1_seqids_categories',
-        'p1_seqids_genus',
-        'p1_seqids_genus_bootstrap',
+        # 'p1_seqids_genus',
+        # 'p1_seqids_genus_bootstrap',
         'p1_seqids_group',
         'p1_seqids_group_bootstrap',
         'p1_seqids_species',
         'p1_seqids_species_bootstrap',
-        # 'p2_reads_total',
         'p2_seqids',
         'p2_seqids_reads',
         'p2_seqids_categories',
-        'p2_seqids_genus',
-        'p2_seqids_genus_bootstrap',
+        # 'p2_seqids_genus',
+        # 'p2_seqids_genus_bootstrap',
         'p2_seqids_group',
         'p2_seqids_group_bootstrap',
         'p2_seqids_species',
@@ -529,7 +522,7 @@ def plasm(args):
         'plasm_taxa',
         'plasm_labels',
         'plasm_detection',
-        'plasm_group_detected',
+        'plasm_groups_detected',
         'plasm_species_detected',
         'plasm_ref'
     ]].to_csv(plasm_assignment_fn, sep='\t', index=False)
