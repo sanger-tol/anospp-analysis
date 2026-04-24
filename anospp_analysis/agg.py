@@ -113,7 +113,7 @@ def agg(args):
     run_id, comb_stats_df = load_comb_stats(args.stats)
     plasm_df = pd.read_csv(args.plasm, sep='\t')
     nn_df = pd.read_csv(args.nn, sep='\t')
-    af_df = pd.read_csv(args.assignment_fine, sep='\t')
+    # af_df = pd.read_csv(args.assignment_fine, sep='\t')
     vae_df = pd.read_csv(args.vae, sep='\t')
 
     logging.info("merging results tables")
@@ -142,13 +142,13 @@ def agg(args):
         'nnovae_call_method'
     ] = 'VAE'
 
-    logging.info('adding NN fine assignment proportions')
-    arr = af_df.columns.to_list()
-    arr[0] = 'sample_id'
-    af_df.columns = arr
-    assert af_df.sample_id.isin(comb_df.sample_id).all(), \
-        'some NN fine assignment samples do not match NN, plasm, comb stats'
-    comb_df = pd.merge(comb_df, af_df, how='left')
+    # logging.info('adding NN fine assignment proportions')
+    # arr = af_df.columns.to_list()
+    # arr[0] = 'sample_id'
+    # af_df.columns = arr
+    # assert af_df.sample_id.isin(comb_df.sample_id).all(), \
+    #     'some NN fine assignment samples do not match NN, plasm, comb stats'
+    # comb_df = pd.merge(comb_df, af_df, how='left')
 
 
     if not args.force:
@@ -167,9 +167,9 @@ def main():
     parser.add_argument('-n', '--nn', 
                         help='path to NN sample assignment tsv. Default: nn/nn_assignment.tsv', 
                         default='nn/nn_assignment.tsv')
-    parser.add_argument('-a', '--assignment_fine', 
-                        help='path to NN fine assignment proportions tsv. Default: nn/assignment_fine.tsv', 
-                        default='nn/assignment_fine.tsv')                    
+    # parser.add_argument('-a', '--assignment_fine', 
+    #                     help='path to NN fine assignment proportions tsv. Default: nn/assignment_fine.tsv', 
+    #                     default='nn/assignment_fine.tsv')                    
     parser.add_argument('-e', '--vae', 
                         help='path to VAE assignment tsv. Default: vae/vae_assignment.tsv',
                         default='vae/vae_assignment.tsv')
