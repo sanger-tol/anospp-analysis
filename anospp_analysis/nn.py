@@ -582,21 +582,15 @@ def plot_assignment_proportions(comb_stats_df, nn_level_result_df, level_label, 
 
     # plasm color scheme - applied to bottom ticks
     if plasm_assignment_df is not None and plasm_colors is not None:
-        logging.info('using plasm predictions to colour sample labels')
-        plasm_assignment_df['plasmodium_species'] = plasm_assignment_df['plasmodium_species'].fillna('')
-        plasm_spp = plasm_assignment_df.set_index('sample_id')['plasmodium_species'].to_dict()
-        assert set(plasm_spp.keys()) == set(comb_stats_df.sample_id), \
+        logging.info('using plasm group predictions to colour sample labels')
+        plasm_assignment_df['plasm_groups_detected'] = plasm_assignment_df['plasm_groups_detected'].fillna('')
+        plasm_groups = plasm_assignment_df.set_index('sample_id')['plasm_groups_detected'].to_dict()
+        assert set(plasm_groups.keys()) == set(comb_stats_df.sample_id), \
             'plasmodium assignment samples do not match nn samples'
-
-        # named species in legend - remove genus name
-        plasm_legend_colors = {sp[11:]:color for sp, color in plasm_colors.iloc[:6].to_dict().items()}
-        # other species collapsed
-        assert plasm_colors.iloc[6:].nunique() == 1, \
-            'plasmodium species color scheme not matching nn plot expectation'
-        plasm_legend_colors['other'] = plasm_colors['unknown']
+        plasm_legend_colors = plasm_colors.to_dict()
         # mixed/uninfected inferred during plotting
-        plasm_legend_colors['mixed'] = '#000000'
-        plasm_legend_colors['none'] = '#808080'
+        plasm_legend_colors['mixed'] = '#000000' # black
+        plasm_legend_colors['none'] = '#808080' # grey
 
     # plot
     plates = comb_stats_df.plate_id.unique()
@@ -630,7 +624,7 @@ def plot_assignment_proportions(comb_stats_df, nn_level_result_df, level_label, 
         ax.set_xticklabels(plot_df['sample_name'])
         if plasm_assignment_df is not None and plasm_colors is not None:
             for i, r in plot_df.iterrows():
-                sample_plasm_sp = plasm_spp[r.sample_id]
+                sample_plasm_sp = plasm_groups[r.sample_id]
                 # multiple species infection
                 if len(sample_plasm_sp.split(';')) > 1:
                     ax.get_xticklabels()[i].set_color('black')
@@ -863,13 +857,13 @@ def nn(args):
 
         if args.plasm_assignment is not None and args.plasm_colors is not None:
             plasm_df = pd.read_csv(args.plasm_assignment, sep='\t')
-            plasm_colors = pd.read_csv(args.plasm_colors).set_index('species')['color']
+            plasm_colors = pd.read_csv(args.plasm_colors, sep='\t').set_index('group')['colour']
         else:
             plasm_df = None
             plasm_colors = None
         
         for level in ['coarse', 'int', 'fine']:
-            fig_fn = f'{args.outdir}/{level}_assignment.png'
+            fig_fn = f'{args.outdir}/assignment_{level}.png'
             if args.resume and os.path.isfile(fig_fn):
                 logging.warning(f'nn figure {fig_fn} exists, not re-genrating')
             else:
@@ -929,7 +923,7 @@ def main():
                         'in nn plots. Default: None - colouring not applied',
                         default=None)
     parser.add_argument('--plasm_colors',
-                        help='Path to species_colours.csv from plasm reference directory '
+                        help='Path to plasm_colours.tsv from plasm reference directory '
                         'used for sample label colouring in nn plots. '
                         'Default: None - colouring not applied',
                         default=None)
