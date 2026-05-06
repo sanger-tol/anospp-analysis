@@ -1,12 +1,14 @@
 import pandas as pd
 import logging
 
+from anospp_analysis import __version__
+
 MOSQ_TARGETS = [str(i) for i in range(62)]
 PLASM_TARGETS = ['P1', 'P2']
 ANOSPP_TARGETS = MOSQ_TARGETS + PLASM_TARGETS
 CUTADAPT_TARGETS = ANOSPP_TARGETS + ['unknown']
 
-def setup_logging(verbose=False):
+def setup_logging(verbose=False, v=__version__):
     try: 
         del logging.root.handlers[:]
     except:
@@ -15,6 +17,7 @@ def setup_logging(verbose=False):
         logging.basicConfig(level=logging.INFO, format='[%(levelname)s] [%(asctime)s] %(message)s')
     else:
         logging.basicConfig(level=logging.WARNING, format='[%(levelname)s] [%(asctime)s] %(message)s')
+    logging.info(f'anospp-analysis v.{v}')
 
 def well_id_mapper():
     '''
