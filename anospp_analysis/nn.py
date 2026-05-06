@@ -482,7 +482,7 @@ def estimate_fine_ratio(comb_stats_df, results_dfs, level_hierarchy):
         if len(top_hit_group_members) == 1:
             logging.warning(f'no other fine level labels in int or coarse for {top_hit}, skipping ratio')
             continue
-        second_conflict = False
+        second_conflict = 'no'
         for i in range(1, len(p_sorted)):
             second_hit = p_sorted.index[i]
             if second_hit in top_hit_group_members:
@@ -493,7 +493,7 @@ def estimate_fine_ratio(comb_stats_df, results_dfs, level_hierarchy):
                     break
             # record conflict for mismatches
             else:
-                second_conflict = True
+                second_conflict = 'yes'
         else:
             logging.warning(f'no concordant second hit found for {top_hit} ({top_hit_prop}) in {sample_id}, skipping ratio')
             continue
