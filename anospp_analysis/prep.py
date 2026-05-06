@@ -7,41 +7,31 @@ import logging
 
 from anospp_analysis.util import seqid_generator, setup_logging, well_id_mapper, lims_well_id_mapper, load_hap, CUTADAPT_TARGETS, MOSQ_TARGETS, PLASM_TARGETS
 
-# optimised cutadapt args
-CUTADAPT_ARGS = '-O 10 --match-read-wildcards'
-
-
-def prep_asv_table(asv_table, sample_df, seq_col='sequence'):
-    '''
-    read and check ASV table
-    '''
+def parse_asv_tsv(asv_table):
 
     logging.info(f'preparing ASV table from {asv_table}')
 
-    asv_df = pd.read_csv(asv_table, sep='\t', index_col=0)
+    rows = []
 
-    assert asv_df.index.is_unique, 'sample id is not unique in asv_table'
+    with open(asv_table) as f:
+        header = f.readline().rstrip("\n").split("\t")
+        
+        # structure: ASV_ID | sample_1 ... sample_n | sequence
+        sample_ids = header[1:-1]
 
-    if 'upstream_id' in sample_df.columns:
-        logging.warning(
-            'found upstream_id column in sample manifest, '
-            'renaming samples in ASV table to match')
-        assert asv_df.index.isin(sample_df.upstream_id).all(), \
-            'found sample IDs in ASV table not matching upstream_id in sample manifest'
-        asv_df.index = [sample_df[sample_df.upstream_id == idx].iloc[0]['sample_id'] for idx in asv_df.index]
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            asv_id = parts[0]
+            sequence = parts[-1]
+            counts = parts[1:-1]
 
-    assert seq_col in asv_df.columns, '{seq_col} column not found in asv_table'
+            for sample_id, val in zip(sample_ids, counts):
+                if val != "0":  # fast string check, avoids int conversion
+                    rows.append((asv_id, sample_id, sequence, int(val)))
 
-    for col in asv_df.columns:
-        if col != seq_col and not asv_df[col].dtype == int:
-            logging.warning(
-                f'{col} column in asv_table expected to contain read counts, '
-                'found non-integer values'
-                )
+    logging.info(f'found {len(rows)} unique sequences')
 
-    asv_df.rename(columns={seq_col:'sequence'}, inplace=True)
-
-    return asv_df
+    return pd.DataFrame(rows, columns=["asv_id", "sample_id", "sequence", "reads"])
 
 def reverse_complement(seq):
 
@@ -78,8 +68,13 @@ def seq_to_fasta(asv_df, fasta_fn, rc=False):
     
     logging.info(f'writing{extra_msg} ASV sequences to fasta file {fasta_fn}')
 
+    seq_df = asv_df[[
+        'asv_id',
+        'sequence'
+    ]].drop_duplicates().set_index('asv_id')
+
     with open(fasta_fn, 'w') as outfile:
-        for seqid, seq in asv_df['sequence'].items():
+        for seqid, seq in seq_df['sequence'].items():
             if rc:
                 rc_seq = reverse_complement(seq)
                 outfile.write(f'>{seqid}_rc\n{rc_seq}\n')
@@ -126,7 +121,7 @@ def get_deplex_df(work_dir):
 
     return deplex_df
 
-def cutadapt_deplex(asv_df, primers, cutadapt_args=CUTADAPT_ARGS, work_dir='work', rc=False):
+def cutadapt_deplex(asv_df, primers, cutadapt_args, work_dir='work', rc=False):
 
     logging.info(f'cutadapt deplexing started at {work_dir}')
 
@@ -165,23 +160,15 @@ def cutadapt_deplex(asv_df, primers, cutadapt_args=CUTADAPT_ARGS, work_dir='work
 
 def prep_hap_df(asv_df, deplex_df):
 
-    asv_deplex_df = pd.merge(
-        asv_df, deplex_df, 
+    hap_df = asv_df.merge(
+        deplex_df, 
         how='inner',
-        left_index=True, right_index=True,
-        validate='one_to_one')
+        left_on='asv_id', 
+        right_index=True,
+        validate='many_to_one'
+    )
+
     
-    assert asv_deplex_df.shape[0] == asv_df.shape[0] == deplex_df.shape[0], \
-        'lost some sequences in combining deplexing and original ASV data'
-    asv_deplex_df.index.name = 'asv_id'
-    
-    hap_df = pd.melt(
-        asv_deplex_df.reset_index(), 
-        id_vars=['asv_id', 'sequence', 'target', 'trimmed_sequence'],
-        var_name='sample_id',
-        value_name='reads'
-        )
-    # hap_df['target'] = hap_df.target.astype(str)
     if not hap_df['target'].isin(CUTADAPT_TARGETS).all():
         logging.warning('non-ANOSPP targets detected in deplexing')
     hap_df.rename(
@@ -198,8 +185,10 @@ def prep_hap_df(asv_df, deplex_df):
     post_collapse_nseq = len(hap_df)
     if post_collapse_nseq != pre_collapse_nseq:
         logging.info(
-            f'collapsed {pre_collapse_nseq - post_collapse_nseq} sequences with identical inserts')
+            f'collapsed {pre_collapse_nseq - post_collapse_nseq} sequences with identical inserts'
+            )
 
+    logging.info('further annotating haps')
     # duplicated in util.load_hap, but avoids re-compute
     hap_df['total_reads'] = hap_df \
         .groupby(by=['sample_id', 'target']) \
@@ -258,7 +247,7 @@ def prep_samples(samples_fn, run_id=None):
             .str.split('.').str.get(0) \
             .str.split('#', expand=True)
     elif 'lane_index' in samples_df.columns and 'tag_index' in samples_df.columns:
-        logging.info('found lane_index and tag_index columns, using them as is')
+        logging.info('found lane_index and tag_index columns, using them "as is"')
     else:
         logging.warning('no lane_index and tag_index columns found, inferring them from sample order')
         samples_df['lane_index'] = 1
@@ -277,7 +266,7 @@ def prep_samples(samples_fn, run_id=None):
     if 'plate_id' in samples_df.columns and 'well_id' in samples_df.columns:
         logging.info('found plate_id and well_id columns, using them as is')
     else:
-        # sample_id as `{plate_id}_{well_id}-{sanger_sample_id}` 
+        # sample_id as `{plate_id}_{well_id}[-{sanger_sample_id}]` 
         try:
             plate_well_ids = samples_df['sample_id'].str.rsplit('-', n = 1).str.get(0)
             samples_df[['plate_id', 'well_id']] = plate_well_ids.str.rsplit('_', n = 1, expand=True)
@@ -287,7 +276,7 @@ def prep_samples(samples_fn, run_id=None):
             assert (samples_df.plate_id.value_counts() <= 96).all()
             logging.info('inferring plate_id and well_id from sample_id')
         except:
-            logging.info('inferring plate_id and well_id from tags')
+            logging.warning('inferring plate_id and well_id from tags')
             samples_df['plate_id'] = samples_df.apply(lambda r: f'p_{r.run_id}_{(r.tag_index - 1) // 96 + 1}',
                 axis=1)
             samples_df['well_id'] = (samples_df.tag_index % 96).replace(well_id_mapper())
@@ -307,7 +296,7 @@ def prep_samples(samples_fn, run_id=None):
     else:
         logging.info('inferring lims_plate_id from tags')
         samples_df['lims_plate_id'] = samples_df.apply(
-            lambda r: f'lp_{r.run_id}_{(r.tag_index - 1) // 384 + 1}',
+            lambda r: f'lp_{r.run_id}_{(r.name) // 384 + 1}',
             axis=1
             )
         samples_df['lims_well_id'] = (samples_df.tag_index % 384).replace(lims_well_id_mapper())
@@ -451,7 +440,7 @@ def combine_stats(stats_df, hap_df, samples_df):
     comb_stats_df['target_reads'] = comb_stats_df['target_reads'].fillna(0).astype(int)
 
     comb_stats_df['overall_filter_rate'] = comb_stats_df['target_reads'] / comb_stats_df['total_reads']
-    comb_stats_df['overall_filter_rate'] = comb_stats_df['overall_filter_rate'].fillna(0)
+    comb_stats_df['overall_filter_rate'] = comb_stats_df['overall_filter_rate'].fillna(0).round(3)
 
     comb_stats_df['unassigned_asvs'] = hap_df[hap_df.target == 'unknown'] \
         .groupby('sample_id')['consensus'].nunique()
@@ -484,7 +473,7 @@ def combine_stats(stats_df, hap_df, samples_df):
             comb_stats_df[f'{ptl}_reads'] = comb_stats_df[f'{ptl}_reads'].fillna(0).astype(int)
     
     comb_stats_df.reset_index(inplace=True)
-    comb_stats_df.sort_values(by='tag_index', inplace=True)
+    comb_stats_df.sort_values(by=['lane_index','tag_index'], inplace=True)
         
     return comb_stats_df
 
@@ -498,9 +487,9 @@ def prep(args):
 
     run_id, samples_df = prep_samples(args.manifest, args.run_id)
 
-    asv_df = prep_asv_table(args.asv_table, samples_df)
+    asv_df = parse_asv_tsv(args.asv_table)
 
-    deplex_df = cutadapt_deplex(asv_df, args.primers, CUTADAPT_ARGS, args.work_dir, rc=args.rc)
+    deplex_df = cutadapt_deplex(asv_df, args.primers, args.cutadapt_args, args.work_dir, rc=args.rc)
 
     hap_df = prep_hap_df(asv_df, deplex_df)
 
@@ -568,6 +557,10 @@ def main():
                         help=('also run deplexing on reverse complement ASVs, '
                               'useful when amplicon orientation is not defined by barcodes'), 
                         action='store_true')
+    parser.add_argument('-c', '--cutadapt_args',
+                        help=('Additional cutadapt arguments applied at target deplexing. ' 
+                              'Default: "-O 10 --match-read-wildcards"'),
+                        default='-O 10 --match-read-wildcards')
     parser.add_argument('-v', '--verbose', 
                         help='include INFO level log messages', action='store_true')
 
