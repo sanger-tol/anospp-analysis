@@ -22,13 +22,13 @@ def plot_target_balance(hap_df, run_id):
     figsize = (hap_df['target'].nunique() * 0.3, 6)
     fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
     fig.suptitle(f'Amplicon coverage distribution per sample for run {run_id}')
-    sns.stripplot(
+    sns.boxplot(
         data=reads_per_sample_target,
         x = 'target',
         y = 'reads',
         hue = 'target',
-        alpha = .1,
-        jitter = .3,
+        # alpha = .1,
+        # jitter = .3,
         ax = ax
         )
     # ax.get_legend().remove()
@@ -79,9 +79,11 @@ def plot_well_balance(comb_stats_df, run_id):
             data=comb_stats_df,
             x = 'well_id',
             y = 'total_reads',
+            hue = 'well_id',
             ax = ax
             )
     ax.set_yscale('log')
+    ax.axhline(10, c='silver', alpha=.5)
     ax.tick_params(axis='x', rotation=90)
 
     return fig, ax
@@ -242,29 +244,50 @@ def plot_sample_success(comb_stats_df, run_id, anospp=True):
     ycol = 'raw_mosq_reads' if anospp else 'target_reads'
     tgtcol = 'raw_mosq_targets_recovered' if anospp else 'targets_recovered'
 
-    fig, axs = plt.subplots(1, 2, figsize=(12,6), constrained_layout=True)
+    n_plates = comb_stats_df['plate_id'].nunique()
+
+    base_height = 5
+    per_item_height = 0.25
+    legend_height = n_plates * per_item_height
+
+    fig_height = max(base_height, legend_height)
+    fig_width = fig_height * 2
+
+    fig, axs = plt.subplots(
+        1, 2,
+        figsize=(fig_width, fig_height)
+    )
+
     fig.suptitle(f'Key stats covariation for run {run_id}')
+
     for xcol, ax in zip((tgtcol, 'overall_filter_rate'), axs):
         sns.scatterplot(
             data=comb_stats_df,
             x=xcol,
             y=ycol,
             hue='plate_id',
-            alpha=.5, 
-            ax=ax
-            )
+            alpha=.5,
+            ax=ax,
+        )
         ax.set_yscale('log')
         ax.set_ylim(bottom=1)
         ax.axhline(1000, c='silver', alpha=.5)
-    
+
     axs[0].set_xlim(left=0)
     if anospp:
         axs[0].axvline(10, c='silver', alpha=.5)
         axs[0].axvline(50, c='silver', alpha=.5)
         axs[0].set_xlim(right=62)
+
     axs[1].axvline(.5, c='silver', alpha=.5)
     axs[1].set_xlim(left=0, right=1)
-    axs[1].get_legend().remove()
+
+    axs[0].legend_.remove()
+    leg = axs[1].legend_
+    leg.set_bbox_to_anchor((1.02, 1.05))
+    leg._loc = 2  # 'upper left'    
+
+    plt.tight_layout()
 
     return fig, axs
 
@@ -272,42 +295,69 @@ def plot_plasm_balance(comb_stats_df, run_id):
 
     logging.info('plotting Plasmodium read balance')
 
-    max_plasm_reads = max(
-        max(
-            comb_stats_df.p1_reads.max(), 
-            comb_stats_df.p2_reads.max()
-            ),
-        1)
+    n_plates = comb_stats_df['plate_id'].nunique()
 
-    fig, ax = plt.subplots(1, 1, figsize=(5, 5), constrained_layout=True)
+    base_height = 4
+    per_plate_height = 0.25 
+    legend_height = n_plates * per_plate_height
+
+    fig_height = max(base_height, legend_height)
+    fig_width = fig_height
+
+    max_plasm_reads = max(
+        max(comb_stats_df.p1_reads.max(), comb_stats_df.p2_reads.max()),
+        1
+    )
+
+    fig, ax = plt.subplots(
+        1, 1,
+        figsize=(fig_width, fig_height),
+    )
+
     fig.suptitle(f'P1/P2 coverage balance for run {run_id}')
+
     sns.scatterplot(
-        # display P1 or P2-only samples
         data=comb_stats_df.replace(0, 0.5),
         x='p1_reads',
         y='p2_reads',
         hue='plate_id',
-        alpha=.5, 
+        alpha=.5,
         ax=ax
-        )
-    # hard filter cutoff
+    )
+
+    # thresholds
     ax.axhline(10, c='silver', alpha=.5)
     ax.axvline(10, c='silver', alpha=.5)
-    # contamination affected sample cutoff
+
     ax.axhline(100, c='green', alpha=.5, linestyle='dashed')
     ax.axvline(100, c='green', alpha=.5, linestyle='dashed')
-    # contamination source sample cutoff
+
     ax.axhline(10000, c='red', alpha=.5, linestyle='dashed')
     ax.axvline(10000, c='red', alpha=.5, linestyle='dashed')
+
     ax.plot(
         [0.4, max_plasm_reads],
         [0.4, max_plasm_reads],
         color='silver',
         linestyle='dashed',
         alpha=.5
-        )
+    )
+
     ax.set_yscale('log')
     ax.set_xscale('log')
+
+    # legend outside
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(
+        handles=handles,
+        labels=labels,
+        title='plate_id',
+        bbox_to_anchor=(1.02, 1.05),
+        loc='upper left'
+    )
+
+    plt.tight_layout()
+    # plt.subplots_adjust(right=0.75)
 
     return fig, ax
 
@@ -491,9 +541,6 @@ def qc(args):
     fig, _ = plot_well_balance(comb_stats_df, run_id)
     fig.savefig(f'{args.outdir}/well_balance.png')
 
-    fig, _ = plot_sample_filtering(comb_stats_df, run_id, anospp=anospp)
-    fig.savefig(f'{args.outdir}/filter_per_sample.png')
-
     # set of plots tweaked for anospp only 
     if anospp:
         # disabled as logistic fit does not work prior to filtering, 
@@ -520,6 +567,9 @@ def qc(args):
         # enabled for non-ANOSPP data, untested
         fig, _, _, _ = plot_het_cov(hap_df, title='Total', run_id=run_id)
         fig.savefig(f'{args.outdir}/het_cov.png')
+
+    fig, _ = plot_sample_filtering(comb_stats_df, run_id, anospp=anospp)
+    fig.savefig(f'{args.outdir}/filter_per_sample.png')
 
     if anospp:
         heatmap_cols = [
