@@ -395,6 +395,7 @@ def plasm(args):
     reference_version = reference_path.split('/')[-1]
     assert os.path.isdir(reference_path), f'reference directory does not exist at {reference_path}'
     assert re.match(r'^plasmv\d', reference_version), f'{reference_version} not recognised as plasm ref version'
+    assert reference_version != 'plasmv1', 'plasmv1 not supported since anospp-analysis v0.5.0'
     sintax_dbs = {}
     for tgt in PLASM_TARGETS:
         sintax_db_path = f'{reference_path}/sintax_db_{tgt}.fasta'

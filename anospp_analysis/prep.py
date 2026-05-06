@@ -148,7 +148,7 @@ def cutadapt_deplex(asv_df, primers, cutadapt_args=CUTADAPT_ARGS, work_dir='work
     deplex_df = get_deplex_df(work_dir)
     if rc:
         logging.info('adding reverse complement sequences')
-        rc_deplex_df = get_deplex_df(work_dir + '_rc')
+        rc_deplex_df = get_deplex_df(work_dir + '/rc')
         assert deplex_df.shape[0] == rc_deplex_df.shape[0], \
             'mismatch in deplex and reverse complement sequences number'
         n_rc = 0
@@ -223,7 +223,7 @@ def prep_samples(samples_fn, run_id=None):
     logging.info(f'preparing sample manifest from {samples_fn}')
     # allow reading from tsv (new style) or csv (old style)
     if samples_fn.endswith('csv'):
-        logging.warning('legacy csv manifest detected, converting to new conventions')
+        logging.warning('csv manifest detected, assuming legacy format, converting to new conventions')
         samples_df = pd.read_csv(samples_fn, sep=',', dtype='str')
         samples_df.rename(columns=({
             'Source_sample':'sample_id',
@@ -235,12 +235,12 @@ def prep_samples(samples_fn, run_id=None):
             inplace=True)
     elif samples_fn.endswith('tsv'):
         # logging.info(f'preparing sample manifest from new style file {samples_fn}')
-        samples_df = pd.read_csv(samples_fn, sep='\t', dtype='object')
+        samples_df = pd.read_csv(samples_fn, sep='\t', dtype='str')
         if 'derived_sample_id' in samples_df.columns:
             logging.info('found derived_sample_id column, using it as sample_id')
             samples_df.rename(columns=({'derived_sample_id':'sample_id'}), inplace=True)
     else:
-        raise ValueError(f'Expected {samples_fn} to be in either tsv or csv format')    
+        raise ValueError(f'Expected {samples_fn} to be in either tsv (new) or csv (old) format')    
 
     logging.info('inferring run_id, lane_index and tag_index')
     if run_id is not None:
@@ -248,7 +248,7 @@ def prep_samples(samples_fn, run_id=None):
         samples_df['run_id'] = run_id
     if 'irods_path' in samples_df.columns:
         logging.warning('inferring run_id, lane_index and tag_index from irods_path column')
-        assert samples_df.irods_path.str.match('/seq/\d{5}/\d{5}_\d#\d+.cram').all(), \
+        assert samples_df.irods_path.fillna('').str.match('/seq/\d{5}/\d{5}_\d#\d+.cram').all(), \
             ('tsv sample manifest input requires irods_path column to be present '
             'and match "/seq/12345/12345_1#123.cram"')
         samples_df['run_id'] = samples_df.irods_path.str.split('/').str.get(2)
