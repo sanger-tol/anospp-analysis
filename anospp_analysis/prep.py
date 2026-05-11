@@ -168,7 +168,6 @@ def prep_hap_df(asv_df, deplex_df):
         validate='many_to_one'
     )
 
-    
     if not hap_df['target'].isin(CUTADAPT_TARGETS).all():
         logging.warning('non-ANOSPP targets detected in deplexing')
     hap_df.rename(
@@ -240,7 +239,8 @@ def prep_samples(samples_fn, run_id=None):
         assert samples_df.irods_path.fillna('').str.match('/seq/\d{5}/\d{5}_\d#\d+.cram').all(), \
             ('tsv sample manifest input requires irods_path column to be present '
             'and match "/seq/12345/12345_1#123.cram"')
-        samples_df['run_id'] = samples_df.irods_path.str.split('/').str.get(2)
+        if run_id is None:
+            samples_df['run_id'] = samples_df.irods_path.str.split('/').str.get(2)
         samples_df[['lane_index', 'tag_index']] = samples_df.irods_path \
             .str.split('/').str.get(3) \
             .str.split('_').str.get(1) \
@@ -258,7 +258,7 @@ def prep_samples(samples_fn, run_id=None):
                 'lane_index',
                 'tag_index'):
         assert col in samples_df.columns, f'samples column {col} not found'
-    samples_df['run_id'] = samples_df['run_id'].astype(int)
+    # samples_df['run_id'] = samples_df['run_id'].astype(int)
     samples_df['lane_index'] = samples_df['lane_index'].astype(int)
     samples_df['tag_index'] = samples_df['tag_index'].astype(int)
     

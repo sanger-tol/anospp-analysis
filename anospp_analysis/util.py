@@ -1,5 +1,7 @@
 import pandas as pd
 import logging
+import sys
+import shlex
 
 from anospp_analysis import __version__
 
@@ -18,6 +20,9 @@ def setup_logging(verbose=False, v=__version__):
     else:
         logging.basicConfig(level=logging.WARNING, format='[%(levelname)s] [%(asctime)s] %(message)s')
     logging.info(f'anospp-analysis v.{v}')
+
+    cmd = [sys.executable] + sys.argv
+    logging.info(" ".join(shlex.quote(arg) for arg in cmd))
 
 def well_id_mapper():
     '''

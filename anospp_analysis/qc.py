@@ -300,9 +300,10 @@ def plot_plasm_balance(comb_stats_df, run_id):
     base_height = 4
     per_plate_height = 0.25 
     legend_height = n_plates * per_plate_height
+    legend_width = 0.2 + max(comb_stats_df['plate_id'].str.len()) * 0.1
 
     fig_height = max(base_height, legend_height)
-    fig_width = fig_height
+    fig_width = fig_height + legend_width
 
     max_plasm_reads = max(
         max(comb_stats_df.p1_reads.max(), comb_stats_df.p2_reads.max()),
@@ -510,8 +511,6 @@ def plot_cov(comb_stats_df, run_id):
 def qc(args):
 
     setup_logging(verbose=args.verbose)
-
-    os.makedirs(args.outdir, exist_ok=True)
     
     logging.info('ANOSPP QC data import')
 
@@ -519,8 +518,9 @@ def qc(args):
     
     run_id, comb_stats_df = load_comb_stats(args.stats)
     
-    logging.info('plotting QC')
-    
+    logging.info(f'plotting QC, output directory {args.outdir}')
+    os.makedirs(args.outdir, exist_ok=True)
+
     if hap_df['target'].isin(CUTADAPT_TARGETS).all():
         anospp = True
         logging.info('only ANOSPP targets detected, plotting all ANOSPP QC plots')
