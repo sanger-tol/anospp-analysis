@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "anospp-analysis"
-version = "0.3.0"
+version = "0.5.0"
 description = "ANOSPP data analysis"
 authors = ["Alex Makunin <am60@sanger.ac.uk>",]
 license = "MIT"

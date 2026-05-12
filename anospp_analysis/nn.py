@@ -6,9 +6,35 @@ import os
 import re
 import argparse
 import itertools
+import logging
 
-from anospp_analysis.util import *
+from anospp_analysis.util import MOSQ_TARGETS, setup_logging, well_ordering, load_hap, load_comb_stats
 from anospp_analysis.qc import plot_het_cov
+from anospp_analysis.vsearch import run_vsearch_sintax, parse_sintax
+
+def mosq_sintax(hap_df, nn_sintax_ref, nn_sintax_ranks, nn_sintax_outdir):
+
+    os.makedirs(nn_sintax_outdir, exist_ok=True)
+
+    uniq_hap_df = hap_df[~hap_df.seqid.duplicated()]
+    uniq_sintax_fa = f'{nn_sintax_outdir}/uniq_hap.fasta'
+    nhaps = 0
+    with open(uniq_sintax_fa, 'w') as o:
+        for i, r in uniq_hap_df.iterrows():
+            if r.target in MOSQ_TARGETS:
+                nhaps += 1
+                o.write(f'>{r.seqid}\n')
+                o.write(f'{r.consensus}\n')
+    
+    logging.info(f'running SINTAX for {nhaps} mosquito haps')
+
+    sintax_fn = f'{nn_sintax_outdir}/sintax.tsv'
+    run_vsearch_sintax(uniq_sintax_fa, nn_sintax_ref, sintax_fn)
+
+    sintax_df = parse_sintax(sintax_fn, nn_sintax_ranks)
+    expanded_sintax_fn = f'{nn_sintax_outdir}/sintax_expanded.tsv'
+    logging.info(f'writing SINTAX assignments to {expanded_sintax_fn}')
+    sintax_df.to_csv(expanded_sintax_fn, sep='\t', index=False)
 
 def prep_mosquito_haps(hap_df, rc_threshold, rf_threshold):
     '''
@@ -26,7 +52,7 @@ def prep_mosquito_haps(hap_df, rc_threshold, rf_threshold):
         ]
     if filtered_hap_df.shape[0] < hap_df.shape[0]:
         logging.info(
-            f'removed {hap_df.shape[0] - filtered_hap_df.shape[0]} haplotypes '
+            f'removed {hap_df.shape[0] - filtered_hap_df.shape[0]} haplotype instances '
             f'with fewer than {rc_threshold} reads or fraction lower than {rf_threshold} of reads'
         )
     assert filtered_hap_df.shape[0] > 0, 'No haplotypes left after filtering, terminating'
@@ -95,8 +121,14 @@ def prep_reference_index(reference_path):
         else:
             clr = np.load(f'{reference_path}/colors_{level}.npy')
             colors[level] = clr
-        
-    return(ref_hap_df, allele_freqs, true_multi_targets, colors, version_name)
+    
+    level_hierarchy = ref_hap_df[[
+        'fine_sgp','int_sgp','coarse_sgp'
+    ]].drop_duplicates()
+
+    assert level_hierarchy['fine_sgp'].is_unique, 'found duplicate fine level labels in hiearchy, terminating'
+
+    return(ref_hap_df, allele_freqs, true_multi_targets, colors, level_hierarchy, version_name)
 
 def construct_kmer_dict(k):
     '''
@@ -432,6 +464,52 @@ def generate_hard_calls(comb_stats_df, non_error_hap_df, test_samples, results_d
 
     return comb_stats_df
 
+def estimate_fine_ratio(comb_stats_df, results_dfs, level_hierarchy):
+
+    logging.info(f'estimating fine level top two hits assignment ratio')
+
+    ratios = {}
+    for sample_id, r in results_dfs['fine'].iterrows():
+        p_sorted = r.sort_values(ascending=False)
+        top_hit = p_sorted.index[0]
+        top_hit_prop = p_sorted[top_hit]
+        top_hit_group = level_hierarchy.loc[level_hierarchy['fine_sgp'] == top_hit, 'int_sgp'].iloc[0]
+        top_hit_group_members = level_hierarchy.loc[level_hierarchy['int_sgp'] == top_hit_group, 'fine_sgp'].to_list()
+        if len(top_hit_group_members) == 1:
+            # logging.info(f'{top_hit} is the only fine label in int group {top_hit_group}, using coarse group for ratio')
+            top_hit_group = level_hierarchy.loc[level_hierarchy['fine_sgp'] == top_hit, 'coarse_sgp'].iloc[0]
+            top_hit_group_members = level_hierarchy.loc[level_hierarchy['coarse_sgp'] == top_hit_group, 'fine_sgp'].to_list()
+        if len(top_hit_group_members) == 1:
+            logging.warning(f'no other fine level labels in int or coarse for {top_hit}, skipping ratio')
+            continue
+        second_conflict = 'no'
+        for i in range(1, len(p_sorted)):
+            second_hit = p_sorted.index[i]
+            if second_hit in top_hit_group_members:
+                second_hit_prop = p_sorted[second_hit]
+                # do not record ratio for zero frequency second hit
+                if second_hit_prop > 0:
+                    ratio = top_hit_prop / second_hit_prop
+                    break
+            # record conflict for mismatches
+            else:
+                second_conflict = 'yes'
+        else:
+            logging.warning(f'no concordant second hit found for {top_hit} ({top_hit_prop}) in {sample_id}, skipping ratio')
+            continue
+        ratios[sample_id] = {
+            'fine_top_hit': top_hit,
+            'fine_second_hit': second_hit,
+            'fine_ratio': ratio,
+            'fine_second_conflict': second_conflict
+        }
+    ratios_df = pd.DataFrame.from_dict(ratios, orient='index')
+    ratios_df['fine_ratio'] = ratios_df['fine_ratio'].round(3)
+
+    comb_stats_df = comb_stats_df.merge(ratios_df, left_on='sample_id', right_index=True, how='left')
+
+    return comb_stats_df
+
 def generate_summary(comb_stats_df, version_name):
 
     summary = [
@@ -450,12 +528,6 @@ def generate_summary(comb_stats_df, version_name):
         f'samples with sufficient coverage could not be assigned at intermediate level',
     ]
     return '\n'.join(summary)
-
-def prep_stats_for_plotting(comb_stats_df, locov_rc):
-
-    
-
-    return comb_stats_df
 
 def plot_assignment_proportions(comb_stats_df, nn_level_result_df, level_label, level_colors, run_id, plasm_assignment_df, plasm_colors, args):
     
@@ -510,21 +582,15 @@ def plot_assignment_proportions(comb_stats_df, nn_level_result_df, level_label, 
 
     # plasm color scheme - applied to bottom ticks
     if plasm_assignment_df is not None and plasm_colors is not None:
-        logging.info(f'using plasm predictions to colour sample labels')
-        plasm_assignment_df['plasmodium_species'] = plasm_assignment_df['plasmodium_species'].fillna('')
-        plasm_spp = plasm_assignment_df.set_index('sample_id')['plasmodium_species'].to_dict()
-        assert set(plasm_spp.keys()) == set(comb_stats_df.sample_id), \
+        logging.info('using plasm group predictions to colour sample labels')
+        plasm_assignment_df['plasm_groups_detected'] = plasm_assignment_df['plasm_groups_detected'].fillna('')
+        plasm_groups = plasm_assignment_df.set_index('sample_id')['plasm_groups_detected'].to_dict()
+        assert set(plasm_groups.keys()) == set(comb_stats_df.sample_id), \
             'plasmodium assignment samples do not match nn samples'
-
-        # named species in legend - remove genus name
-        plasm_legend_colors = {sp[11:]:color for sp, color in plasm_colors.iloc[:6].to_dict().items()}
-        # other species collapsed
-        assert plasm_colors.iloc[6:].nunique() == 1, \
-            'plasmodium species color scheme not matching nn plot expectation'
-        plasm_legend_colors['other'] = plasm_colors['unknown']
+        plasm_legend_colors = plasm_colors.to_dict()
         # mixed/uninfected inferred during plotting
-        plasm_legend_colors['mixed'] = '#000000'
-        plasm_legend_colors['none'] = '#808080'
+        plasm_legend_colors['mixed'] = '#000000' # black
+        plasm_legend_colors['none'] = '#808080' # grey
 
     # plot
     plates = comb_stats_df.plate_id.unique()
@@ -558,7 +624,7 @@ def plot_assignment_proportions(comb_stats_df, nn_level_result_df, level_label, 
         ax.set_xticklabels(plot_df['sample_name'])
         if plasm_assignment_df is not None and plasm_colors is not None:
             for i, r in plot_df.iterrows():
-                sample_plasm_sp = plasm_spp[r.sample_id]
+                sample_plasm_sp = plasm_groups[r.sample_id]
                 # multiple species infection
                 if len(sample_plasm_sp.split(';')) > 1:
                     ax.get_xticklabels()[i].set_color('black')
@@ -637,7 +703,6 @@ def plot_assignment_proportions(comb_stats_df, nn_level_result_df, level_label, 
 
     return fig, axs
 
-
 def nn(args):
 
     setup_logging(verbose=args.verbose)
@@ -646,33 +711,49 @@ def nn(args):
 
     logging.info('ANOSPP NN data import started')
 
-    hap_df = prep_hap(args.haplotypes)
-    run_id, comb_stats_df = prep_comb_stats(args.stats)
+    hap_df = load_hap(args.haplotypes)
+    run_id, comb_stats_df = load_comb_stats(args.stats)
+
+    # SINTAX
+    expanded_sintax_fn = f'{args.outdir}/sintax_prefilter/sintax_expanded.tsv'
+    if args.resume and os.path.isfile(expanded_sintax_fn):
+        logging.warning(f'SINTAX results found at {expanded_sintax_fn}, skipping SINTAX')
+    else:
+        nn_sintax_ref = f'{args.reference_path}/nn_sintax.fasta'
+        nn_sintax_ranks_fn = f'{args.reference_path}/nn_sintax_ranks.tsv'
+        nn_sintax_outdir = f'{args.outdir}/sintax_prefilter/'
+        if os.path.isfile(nn_sintax_ref) and os.path.isfile(nn_sintax_ranks_fn):
+            nn_sintax_ranks = pd.read_csv(nn_sintax_ranks_fn, sep='\t', index_col=0)['nn_rank'].to_dict()
+            mosq_sintax(hap_df, nn_sintax_ref, nn_sintax_ranks, nn_sintax_outdir)
+        else:
+            logging.warning(f'no SINTAX reference at {nn_sintax_ref}, skipping')
     
     logging.info(f'starting NN assignment for {comb_stats_df.sample_id.nunique()} samples in run {run_id}')
+    # mosquito data hard filters
     mosq_hap_df = prep_mosquito_haps(
         hap_df,
         args.hap_read_count_threshold,
         args.hap_reads_fraction_threshold
         )
 
-    ref_hap_df, allele_freqs, true_multi_targets, colors, version_name = prep_reference_index(
+    # reference data
+    ref_hap_df, allele_freqs, true_multi_targets, colors, level_hierarchy, version_name = prep_reference_index(
         args.reference_path
         )
-        
+    
+    # per-haplotype distance estimation and haplotype annotation
     nn_hap_fn = f'{args.outdir}/nn_hap_summary.tsv'
     nndict_fn = f'{args.outdir}/nn_dist_to_ref.tsv'
-    if args.resume and os.path.isfile(nndict_fn):
+    if args.resume and os.path.isfile(nndict_fn) and os.path.isfile(nn_hap_fn):
         logging.warning(f'reading nndict from {nndict_fn}')
         nndict = {}
         with open(nndict_fn) as f:
             next(f)
             for line in f:
-                ll = line.strip().split('\t')
-                if len(ll) == 3:
-                    nndict[ll[0]] = ([int(i) for i in ll[1].split('|')], float(ll[2]))
+                fields = line.strip().split('\t')
+                if len(fields) == 3:
+                    nndict[fields[0]] = ([int(i) for i in fields[1].split('|')], float(fields[2]))
         
-    if args.resume and os.path.isfile(nn_hap_fn):
         logging.warning(f'reading annotated haplotype data from {nn_hap_fn}')
         non_error_hap_df = pd.read_csv(nn_hap_fn, sep='\t')
     else:
@@ -683,25 +764,25 @@ def nn(args):
         non_error_hap_df = mosq_hap_df[~mosq_hap_df.seqid.isin(error_seqs)]
         non_error_hap_df = recompute_haplotype_coverage(non_error_hap_df)
         
-        if not args.resume or not os.path.isfile(nndict_fn):
-            nndict = find_nn_unique_haps(non_error_hap_df, kmers, ref_hap_df, ref_kmers)
-            nn_df = pd.DataFrame.from_dict(nndict, orient='index', columns=['nn_id_array', 'nn_dist'])
-            nn_df['nn_id'] = ['|'.join(map(str, l)) for l in nn_df.nn_id_array]
-            nn_df.index.name = 'seqid'
-            nn_df[['nn_id', 'nn_dist']].to_csv(
-                nndict_fn, 
-                sep='\t',
-                index=True
-                )
-        nn_hap_df = add_nn_to_haplotypes(non_error_hap_df, nndict, ref_hap_df)
+        nndict = find_nn_unique_haps(non_error_hap_df, kmers, ref_hap_df, ref_kmers)
+        nn_df = pd.DataFrame.from_dict(nndict, orient='index', columns=['nn_id_array', 'nn_dist'])
+        nn_df['nn_id'] = ['|'.join(map(str, nn_id)) for nn_id in nn_df.nn_id_array]
+        nn_df.index.name = 'seqid'
+        nn_df[['nn_id', 'nn_dist']].to_csv(
+            nndict_fn, 
+            sep='\t',
+            index=True
+            )
+        non_error_hap_df = add_nn_to_haplotypes(non_error_hap_df, nndict, ref_hap_df)
         logging.info(f'writing annotated haplotypes to {nn_hap_fn}')
-        nn_hap_df.to_csv(nn_hap_fn, index=False, sep='\t')
+        non_error_hap_df.to_csv(nn_hap_fn, index=False, sep='\t')
 
+    # sample-level assignments
     nn_assignment_fn = f'{args.outdir}/nn_assignment.tsv'
     if args.resume and os.path.isfile(nn_assignment_fn):
         logging.warning(f'reading nn assignments from {nn_assignment_fn}')
         nn_stats_df = pd.read_csv(nn_assignment_fn, sep='\t')
-        comb_stats_df = pd.merge(comb_stats_df, nn_stats_df, on='sample_id', how='left')
+        comb_stats_df = pd.merge(comb_stats_df, nn_stats_df, on=['sample_id','run_id'], how='left')
         results_dfs = {}
         for level in ['coarse', 'int', 'fine']:
             level_assignment_fn = f'{args.outdir}/assignment_{level}.tsv'
@@ -728,29 +809,47 @@ def nn(args):
             nn_asgn_threshold=args.nn_assignment_threshold
         )
 
+        
+
         comb_stats_df['nn_ref'] = version_name
-        logging.info(f'writing assignment results to {nn_assignment_fn}')
-        comb_stats_df[[
-            'sample_id',
-            'run_id',
-            'multiallelic_mosq_targets',
-            'mosq_reads',
-            'mosq_targets_recovered',
-            'nn_assignment',
-            'nn_coarse',
-            'nn_int',
-            'nn_fine',
-            'nn_species_call',
-            'nn_call_method',
-            'nn_ref'
-        ]].to_csv(nn_assignment_fn, index=False, sep='\t')
+
+    # temp logic to add fine_ratio to backlog resuls without recomputing hard calls
+    if 'fine_ratio' not in comb_stats_df.columns:
+        comb_stats_df = estimate_fine_ratio(
+                comb_stats_df,
+                results_dfs,
+                level_hierarchy
+            )
+    else:
+        logging.warning('skipping fine ratio estimation')
+    logging.info(f'writing assignment results to {nn_assignment_fn}')
+    comb_stats_df[[
+        'sample_id',
+        'run_id',
+        'multiallelic_mosq_targets',
+        'mosq_reads',
+        'mosq_targets_recovered',
+        'fine_top_hit',
+        'fine_second_hit',
+        'fine_ratio',
+        'fine_second_conflict',
+        'nn_assignment',
+        'nn_coarse',
+        'nn_int',
+        'nn_fine',
+        'nn_species_call',
+        'nn_call_method',
+        'nn_ref'
+    ]].to_csv(nn_assignment_fn, index=False, sep='\t')
     
+    # analysis summary
     summary_text = generate_summary(comb_stats_df, version_name)
     summary_fn = f'{args.outdir}/nn_summary.txt'
     logging.info(f'writing summary file to {summary_fn}')
     with open(summary_fn, 'w') as fn:
         fn.write(summary_text)
 
+    # NN barplots 
     if not args.no_plotting:
 
         fig, _, _, _ = plot_het_cov(non_error_hap_df, title='Mosquito filtered', run_id=run_id)
@@ -758,13 +857,13 @@ def nn(args):
 
         if args.plasm_assignment is not None and args.plasm_colors is not None:
             plasm_df = pd.read_csv(args.plasm_assignment, sep='\t')
-            plasm_colors = pd.read_csv(args.plasm_colors).set_index('species')['color']
+            plasm_colors = pd.read_csv(args.plasm_colors, sep='\t').set_index('group')['colour']
         else:
             plasm_df = None
             plasm_colors = None
         
         for level in ['coarse', 'int', 'fine']:
-            fig_fn = f'{args.outdir}/{level}_assignment.png'
+            fig_fn = f'{args.outdir}/assignment_{level}.png'
             if args.resume and os.path.isfile(fig_fn):
                 logging.warning(f'nn figure {fig_fn} exists, not re-genrating')
             else:
@@ -824,7 +923,7 @@ def main():
                         'in nn plots. Default: None - colouring not applied',
                         default=None)
     parser.add_argument('--plasm_colors',
-                        help='Path to species_colours.csv from plasm reference directory '
+                        help='Path to plasm_colours.tsv from plasm reference directory '
                         'used for sample label colouring in nn plots. '
                         'Default: None - colouring not applied',
                         default=None)
