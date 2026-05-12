@@ -17,6 +17,8 @@ def parse_asv_tsv(asv_table):
         header = f.readline().rstrip("\n").split("\t")
         
         # structure: ASV_ID | sample_1 ... sample_n | sequence
+        assert header[0] == 'ASV_ID', 'Expected first column to be ASV_ID'
+        assert header[-1] == 'sequence', 'Expected last column to be sequence'
         sample_ids = header[1:-1]
 
         for line in f:
@@ -29,7 +31,7 @@ def parse_asv_tsv(asv_table):
                 if val != "0":  # fast string check, avoids int conversion
                     rows.append((asv_id, sample_id, sequence, int(val)))
 
-    logging.info(f'found {len(rows)} unique sequences')
+    logging.info(f'found {len(rows)} ASV sequences')
 
     return pd.DataFrame(rows, columns=["asv_id", "sample_id", "sequence", "reads"])
 
@@ -194,6 +196,7 @@ def prep_hap_df(asv_df, deplex_df):
         ['reads'].transform('sum')
 
     hap_df['reads_fraction'] = hap_df['reads'] / hap_df['total_reads']
+    hap_df['reads_fraction'] = hap_df['reads_fraction'].round(3)
 
     hap_df['nalleles'] = hap_df \
         .groupby(by=['sample_id', 'target']) \
